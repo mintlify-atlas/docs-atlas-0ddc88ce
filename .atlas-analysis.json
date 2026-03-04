@@ -1,0 +1,89 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "effect-orpc",
+  "projectDescription": "Type-safe integration between oRPC and Effect-TS enabling Effect-native procedures with service injection and error handling",
+  "theme": "aspen",
+  "primaryColor": "#cb0404",
+  "lightColor": "#f3d2d2",
+  "darkColor": "#e37b84",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": ["introduction", "installation", "quickstart"]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/effect-procedures",
+              "concepts/service-injection",
+              "concepts/error-handling",
+              "concepts/tracing"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/creating-procedures",
+              "guides/using-services",
+              "guides/error-management",
+              "guides/opentelemetry",
+              "guides/mixing-procedures"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core API",
+            "pages": [
+              "api/make-effect-orpc",
+              "api/effect-builder",
+              "api/effect-procedure"
+            ]
+          },
+          {
+            "group": "Error Handling",
+            "pages": [
+              "api/orpc-tagged-error",
+              "api/error-utilities"
+            ]
+          },
+          {
+            "group": "Types",
+            "pages": [
+              "api/types/builder-types",
+              "api/types/procedure-types",
+              "api/types/error-types"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Effect-native procedures with generator syntax",
+    "Type-safe service injection via ManagedRuntime",
+    "Tagged error classes with oRPC integration",
+    "Automatic OpenTelemetry tracing support",
+    "Full compatibility with standard oRPC procedures",
+    "Builder pattern with all oRPC methods preserved"
+  ],
+  "publicApiSurface": [
+    "makeEffectORPC(runtime, builder?)",
+    "ORPCTaggedError(tag, options?)",
+    "EffectBuilder",
+    "EffectDecoratedProcedure",
+    "effectErrorMapToErrorMap",
+    "createEffectErrorConstructorMap",
+    "addSpanStackTrace",
+    "isORPCTaggedError",
+    "isORPCTaggedErrorClass",
+    "toORPCError"
+  ]
+}
