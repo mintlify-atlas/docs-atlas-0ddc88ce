@@ -1,0 +1,379 @@
+---
+title: Error utilities
+description: Utility functions for working with ORPCTaggedError instances
+---
+
+## Overview
+
+This page documents utility functions and types for working with tagged errors in effect-orpc.
+
+## Functions
+
+### toORPCError()
+
+Converts an `ORPCTaggedError` instance to a plain `ORPCError` instance. This is useful when you need to throw or return a plain oRPC error from a handler.
+
+#### Signature
+
+```typescript
+function toORPCError<
+  TCode extends ORPCErrorCode,
+  TSchema extends AnySchema = AnySchema
+>(
+  error: ORPCTaggedErrorInstance<string, TCode, TSchema>
+): ORPCError<TCode, InferSchemaOutput<TSchema>>
+```
+
+<ParamField path="error" type="ORPCTaggedErrorInstance" required>
+  The tagged error instance to convert.
+</ParamField>
+
+<ResponseField name="ORPCError" type="ORPCError<TCode, TData>">
+  A plain oRPC error with the same code, status, message, and data.
+</ResponseField>
+
+#### Usage
+
+```typescript
+import { toORPCError, ORPCTaggedError } from 'effect-orpc'
+import { Effect } from 'effect'
+
+class UserNotFoundError extends ORPCTaggedError('UserNotFoundError', {
+  status: 404
+}) {}
+
+const handler = effectOs.effect(function* () {
+  const result = yield* someOperation.pipe(
+    Effect.catchTag('UserNotFoundError', (e) =>
+      Effect.fail(toORPCError(e))
+    )
+  )
+  return result
+})
+```
+
+Note that you can also use the `.toORPCError()` method directly on error instances:
+
+```typescript
+const taggedError = new UserNotFoundError()
+const orpcError = taggedError.toORPCError()
+// Same as: toORPCError(taggedError)
+```
+
+### isORPCTaggedError()
+
+Type guard to check if a value is an `ORPCTaggedError` instance.
+
+#### Signature
+
+```typescript
+function isORPCTaggedError(
+  value: unknown
+): value is ORPCTaggedErrorInstance<string, ORPCErrorCode, AnySchema>
+```
+
+<ParamField path="value" type="unknown" required>
+  The value to check.
+</ParamField>
+
+<ResponseField name="result" type="boolean">
+  `true` if the value is an `ORPCTaggedError` instance, `false` otherwise.
+</ResponseField>
+
+#### Usage
+
+```typescript
+import { isORPCTaggedError, ORPCTaggedError } from 'effect-orpc'
+import { ORPCError } from '@orpc/client'
+
+class UserNotFoundError extends ORPCTaggedError('UserNotFoundError') {}
+
+const taggedError = new UserNotFoundError()
+const plainError = new ORPCError('NOT_FOUND')
+const regularError = new Error('test')
+
+console.log(isORPCTaggedError(taggedError))  // true
+console.log(isORPCTaggedError(plainError))   // false
+console.log(isORPCTaggedError(regularError)) // false
+console.log(isORPCTaggedError(null))         // false
+```
+
+### isORPCTaggedErrorClass()
+
+Type guard to check if a value is an `ORPCTaggedError` class constructor.
+
+#### Signature
+
+```typescript
+function isORPCTaggedErrorClass(
+  value: unknown
+): value is AnyORPCTaggedErrorClass
+```
+
+<ParamField path="value" type="unknown" required>
+  The value to check.
+</ParamField>
+
+<ResponseField name="result" type="boolean">
+  `true` if the value is an `ORPCTaggedError` class constructor, `false` otherwise.
+</ResponseField>
+
+#### Usage
+
+```typescript
+import { isORPCTaggedErrorClass, ORPCTaggedError } from 'effect-orpc'
+
+class UserNotFoundError extends ORPCTaggedError('UserNotFoundError') {}
+
+const instance = new UserNotFoundError()
+
+console.log(isORPCTaggedErrorClass(UserNotFoundError)) // true
+console.log(isORPCTaggedErrorClass(instance))          // false
+console.log(isORPCTaggedErrorClass(Error))             // false
+```
+
+## Error map functions
+
+### createEffectErrorConstructorMap()
+
+Creates an error constructor map from an `EffectErrorMap`. This function is used internally by `makeEffectORPC` to create the `errors` object available in handlers.
+
+#### Signature
+
+```typescript
+function createEffectErrorConstructorMap<T extends EffectErrorMap>(
+  errors: T | undefined
+): EffectErrorConstructorMap<T>
+```
+
+<ParamField path="errors" type="EffectErrorMap | undefined" required>
+  An error map containing either traditional oRPC error items or `ORPCTaggedError` classes.
+</ParamField>
+
+<ResponseField name="EffectErrorConstructorMap" type="EffectErrorConstructorMap<T>">
+  A proxy object that provides typed error constructor functions. Tagged error classes become factory functions, and traditional error items become `ORPCError` constructors.
+</ResponseField>
+
+#### Usage
+
+```typescript
+import { createEffectErrorConstructorMap, ORPCTaggedError } from 'effect-orpc'
+
+class UserNotFoundError extends ORPCTaggedError('UserNotFoundError') {}
+
+const errorMap = {
+  UserNotFoundError,
+  BAD_REQUEST: { status: 400, message: 'Bad request' }
+}
+
+const errors = createEffectErrorConstructorMap(errorMap)
+
+// Creates a UserNotFoundError instance
+const notFoundError = errors.UserNotFoundError()
+
+// Creates an ORPCError instance
+const badRequestError = errors.BAD_REQUEST()
+```
+
+### effectErrorMapToErrorMap()
+
+Converts an `EffectErrorMap` to a standard oRPC `ErrorMap` for interoperability. Tagged error classes are converted to their equivalent `ErrorMapItem` format.
+
+#### Signature
+
+```typescript
+function effectErrorMapToErrorMap<T extends EffectErrorMap>(
+  errorMap: T | undefined
+): EffectErrorMapToErrorMap<T>
+```
+
+<ParamField path="errorMap" type="EffectErrorMap | undefined" required>
+  An error map containing either traditional oRPC error items or `ORPCTaggedError` classes.
+</ParamField>
+
+<ResponseField name="ErrorMap" type="EffectErrorMapToErrorMap<T>">
+  A standard oRPC `ErrorMap` where tagged error classes have been converted to error items.
+</ResponseField>
+
+#### Usage
+
+```typescript
+import { effectErrorMapToErrorMap, ORPCTaggedError } from 'effect-orpc'
+
+class UserNotFoundError extends ORPCTaggedError('UserNotFoundError', {
+  status: 404,
+  message: 'User not found',
+  schema: z.object({ userId: z.string() })
+}) {}
+
+const effectErrorMap = {
+  UserNotFoundError,
+  BAD_REQUEST: { status: 400 }
+}
+
+const standardErrorMap = effectErrorMapToErrorMap(effectErrorMap)
+// {
+//   USER_NOT_FOUND_ERROR: {
+//     status: 404,
+//     message: 'User not found',
+//     data: z.object({ userId: z.string() })
+//   },
+//   BAD_REQUEST: { status: 400 }
+// }
+```
+
+This is useful when you need to pass error maps to standard oRPC utilities that don't understand tagged error classes.
+
+## Type utilities
+
+### ORPCTaggedErrorInstance
+
+Type representing an instance of an `ORPCTaggedError` class.
+
+```typescript
+interface ORPCTaggedErrorInstance<
+  TTag extends string,
+  TCode extends ORPCErrorCode,
+  TSchema extends AnySchema = AnySchema
+> extends Cause.YieldableError, Pipeable.Pipeable {
+  readonly _tag: TTag
+  readonly code: TCode
+  readonly status: number
+  readonly schema: TSchema
+  readonly data: InferSchemaOutput<TSchema>
+  readonly defined: boolean
+  
+  toJSON(): ORPCErrorJSON<TCode, InferSchemaOutput<TSchema>> & { _tag: TTag }
+  toORPCError(): ORPCError<TCode, InferSchemaOutput<TSchema>>
+}
+```
+
+### ORPCTaggedErrorClass
+
+Type representing a constructor for `ORPCTaggedError` instances.
+
+```typescript
+interface ORPCTaggedErrorClass<
+  TTag extends string,
+  TCode extends ORPCErrorCode,
+  TSchema extends AnySchema = AnySchema
+> {
+  readonly _tag: TTag
+  readonly code: TCode
+  new (...args: MaybeOptionalOptions<ORPCTaggedErrorOptions<InferSchemaOutput<TSchema>>>)
+    : ORPCTaggedErrorInstance<TTag, TCode, TSchema>
+}
+```
+
+### AnyORPCTaggedErrorClass
+
+Type accepting any `ORPCTaggedError` class regardless of its generic parameters.
+
+```typescript
+type AnyORPCTaggedErrorClass = {
+  readonly _tag: string
+  readonly code: ORPCErrorCode
+  new (...args: any[]): ORPCTaggedErrorInstance<string, ORPCErrorCode, AnySchema>
+}
+```
+
+### EffectErrorMap
+
+Extended error map that supports both traditional oRPC errors and `ORPCTaggedError` classes.
+
+```typescript
+type EffectErrorMap = {
+  [key in ORPCErrorCode]?: ErrorMapItem<AnySchema> | AnyORPCTaggedErrorClass
+}
+```
+
+#### Usage
+
+```typescript
+import { type EffectErrorMap, ORPCTaggedError } from 'effect-orpc'
+import { z } from 'zod'
+
+class UserNotFoundError extends ORPCTaggedError('UserNotFoundError') {}
+
+const errorMap = {
+  // Traditional format
+  BAD_REQUEST: {
+    status: 400,
+    message: 'Bad request',
+    data: z.object({ fields: z.array(z.string()) })
+  },
+  
+  // Tagged error class reference
+  UserNotFoundError,
+  
+  // Can use any key for tagged errors
+  USER_NOT_FOUND: UserNotFoundError
+} satisfies EffectErrorMap
+```
+
+### EffectErrorMapToUnion
+
+Converts an `EffectErrorMap` to a union of error instances.
+
+```typescript
+import { type EffectErrorMapToUnion } from 'effect-orpc'
+
+const errorMap = {
+  UserNotFoundError,
+  BAD_REQUEST: { status: 400, data: z.object({ message: z.string() }) }
+} satisfies EffectErrorMap
+
+type Errors = EffectErrorMapToUnion<typeof errorMap>
+// type Errors = UserNotFoundError | ORPCError<"BAD_REQUEST", { message: string }>
+```
+
+### InferORPCError
+
+Infers the equivalent `ORPCError` type from an `ORPCTaggedError` instance type.
+
+```typescript
+import { type InferORPCError, ORPCTaggedError } from 'effect-orpc'
+import { z } from 'zod'
+
+class MyError extends ORPCTaggedError('MyError', {
+  schema: z.object({ id: z.string() })
+}) {}
+
+type ErrorType = InferORPCError<MyError>
+// type ErrorType = ORPCError<"MY_ERROR", { id: string }>
+```
+
+### TagToCode
+
+Converts a tag name to an error code in CONSTANT_CASE at the type level.
+
+```typescript
+import { type TagToCode } from 'effect-orpc'
+
+type Code1 = TagToCode<'UserNotFoundError'>
+// type Code1 = "USER_NOT_FOUND_ERROR"
+
+type Code2 = TagToCode<'HTTPError'>
+// type Code2 = "HTTP_ERROR"
+
+type Code3 = TagToCode<'XMLParserError'>
+// type Code3 = "XML_PARSER_ERROR"
+```
+
+## Symbols
+
+### ORPCErrorSymbol
+
+Unique symbol used to access the underlying `ORPCError` instance from a tagged error.
+
+```typescript
+import { ORPCErrorSymbol, ORPCTaggedError } from 'effect-orpc'
+
+class UserNotFoundError extends ORPCTaggedError('UserNotFoundError') {}
+
+const error = new UserNotFoundError()
+const orpcError = error[ORPCErrorSymbol]
+// orpcError is the underlying ORPCError instance
+```
+
+In most cases, you should use the `.toORPCError()` method instead of accessing this symbol directly.

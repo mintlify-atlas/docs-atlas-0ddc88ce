@@ -1,0 +1,581 @@
+---
+title: EffectDecoratedProcedure
+description: Effect-native decorated procedure with full type preservation
+---
+
+## Overview
+
+`EffectDecoratedProcedure` is an Effect-native procedure that extends oRPC's `Procedure` class with additional type parameters for Effect-specific type information. It preserves Effect error and requirements types throughout the procedure lifecycle.
+
+Instances are created by calling `.effect()` or `.handler()` on an [`EffectBuilder`](/api/effect-builder).
+
+## Type parameters
+
+```typescript
+class EffectDecoratedProcedure<
+  TInitialContext extends Context,
+  TCurrentContext extends Context,
+  TInputSchema extends AnySchema,
+  TOutputSchema extends AnySchema,
+  TEffectErrorMap extends EffectErrorMap,
+  TMeta extends Meta,
+  TRequirementsProvided,
+  TRuntimeError
+> extends EffectProcedure<...>
+```
+
+- `TRequirementsProvided` - Services provided by the ManagedRuntime
+- `TRuntimeError` - Errors that can occur in the runtime
+- Other parameters match standard oRPC procedure types
+
+## Creating procedures
+
+### Basic procedure
+
+```typescript
+import { makeEffectORPC } from 'effect-orpc'
+import { Effect, ManagedRuntime } from 'effect'
+import { z } from 'zod'
+
+const runtime = ManagedRuntime.make(Layer.empty)
+const effectOs = makeEffectORPC(runtime)
+
+const hello = effectOs.effect(function* () {
+  return yield* Effect.succeed('Hello, world!')
+})
+
+// hello is an EffectDecoratedProcedure
+```
+
+### With input validation
+
+```typescript
+const greet = effectOs
+  .input(z.object({ name: z.string() }))
+  .effect(function* ({ input }) {
+    return yield* Effect.succeed(`Hello, ${input.name}!`)
+  })
+```
+
+### With service injection
+
+```typescript
+class UserService extends Effect.Service<UserService>()("UserService", {
+  accessors: true,
+  sync: () => ({
+    findById: (id: string) => Effect.succeed({ id, name: 'John' })
+  })
+}) {}
+
+const runtime = ManagedRuntime.make(UserService.Default)
+const effectOs = makeEffectORPC(runtime)
+
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input }) {
+    const user = yield* UserService.findById(input.id)
+    return user
+  })
+```
+
+## Configuration methods
+
+These methods return a new `EffectDecoratedProcedure` with updated configuration.
+
+### errors()
+
+Adds type-safe custom errors to the procedure. Supports both traditional oRPC error definitions and `ORPCTaggedError` classes.
+
+```typescript
+errors<U extends EffectErrorMap>(
+  errors: U
+): EffectDecoratedProcedure<..., MergedEffectErrorMap<TEffectErrorMap, U>, ...>
+```
+
+<ParamField path="errors" type="EffectErrorMap" required>
+  Object mapping error keys to either traditional oRPC error items or `ORPCTaggedError` class constructors.
+</ParamField>
+
+#### Usage
+
+```typescript
+import { ORPCTaggedError } from 'effect-orpc'
+import { z } from 'zod'
+
+class UserNotFoundError extends ORPCTaggedError('UserNotFoundError', {
+  status: 404
+}) {}
+
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .errors({
+    UserNotFoundError,
+    BAD_REQUEST: { status: 400, message: 'Invalid ID' }
+  })
+  .effect(function* ({ input, errors }) {
+    const user = yield* UserService.findById(input.id)
+    if (!user) {
+      return yield* new UserNotFoundError()
+    }
+    return user
+  })
+```
+
+### meta()
+
+Sets or updates the procedure's metadata. Merges with existing metadata.
+
+```typescript
+meta(meta: TMeta): EffectDecoratedProcedure
+```
+
+<ParamField path="meta" type="Meta" required>
+  Metadata object to merge with existing metadata.
+</ParamField>
+
+#### Usage
+
+```typescript
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .meta({
+    rateLimit: 100,
+    requiresAuth: true,
+    description: 'Fetches user by ID'
+  })
+  .effect(function* ({ input }) {
+    // ...
+  })
+```
+
+### route()
+
+Sets or updates the route definition. Merges with existing route configuration. Used for OpenAPI integration.
+
+```typescript
+route(route: Route): EffectDecoratedProcedure
+```
+
+<ParamField path="route" type="Route" required>
+  Route configuration object.
+  
+  <ParamField path="path" type="HTTPPath">
+    HTTP path for the route (e.g., `/users/:id`).
+  </ParamField>
+  
+  <ParamField path="method" type="HTTPMethod">
+    HTTP method (e.g., `GET`, `POST`).
+  </ParamField>
+  
+  <ParamField path="description" type="string">
+    Description for OpenAPI documentation.
+  </ParamField>
+  
+  <ParamField path="summary" type="string">
+    Summary for OpenAPI documentation.
+  </ParamField>
+  
+  <ParamField path="deprecated" type="boolean">
+    Whether the route is deprecated.
+  </ParamField>
+</ParamField>
+
+#### Usage
+
+```typescript
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .route({
+    method: 'GET',
+    path: '/users/:id',
+    summary: 'Get user by ID',
+    description: 'Fetches a single user by their unique identifier'
+  })
+  .effect(function* ({ input }) {
+    // ...
+  })
+```
+
+### use()
+
+Adds middleware to the procedure. Can be called with one or two arguments.
+
+```typescript
+// With input transformation
+use<UOutContext, UInput, UInContext = TCurrentContext>(
+  middleware: Middleware<UInContext | TCurrentContext, UOutContext, UInput, ...>,
+  mapInput: MapInputMiddleware<InferSchemaOutput<TInputSchema>, UInput>
+): EffectDecoratedProcedure<..., MergedCurrentContext<TCurrentContext, UOutContext>, ...>
+
+// Without input transformation
+use<UOutContext, UInContext = TCurrentContext>(
+  middleware: Middleware<UInContext | TCurrentContext, UOutContext, InferSchemaOutput<TInputSchema>, ...>
+): EffectDecoratedProcedure<..., MergedCurrentContext<TCurrentContext, UOutContext>, ...>
+```
+
+<ParamField path="middleware" type="Middleware" required>
+  Middleware function that receives context, input, and calls `next()` to continue.
+</ParamField>
+
+<ParamField path="mapInput" type="MapInputMiddleware">
+  Optional function to transform the input before passing to the middleware.
+</ParamField>
+
+#### Usage
+
+```typescript
+const loggingMiddleware = async ({ input, next }) => {
+  console.log('Input:', input)
+  const result = await next()
+  console.log('Result:', result)
+  return result
+}
+
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .use(loggingMiddleware)
+  .effect(function* ({ input }) {
+    // ...
+  })
+```
+
+#### With input mapping
+
+```typescript
+const cacheMiddleware = async ({ input, next }) => {
+  const cached = cache.get(input.cacheKey)
+  if (cached) return cached
+  const result = await next()
+  cache.set(input.cacheKey, result)
+  return result
+}
+
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .use(
+    cacheMiddleware,
+    // Map procedure input to middleware input
+    (input) => ({ cacheKey: `user:${input.id}` })
+  )
+  .effect(function* ({ input }) {
+    // ...
+  })
+```
+
+## Client methods
+
+These methods make the procedure directly callable or compatible with server actions.
+
+### callable()
+
+Makes the procedure directly callable like a function while still being a procedure instance.
+
+```typescript
+callable<TClientContext extends ClientContext>(
+  options?: CreateProcedureClientOptions<
+    TInitialContext,
+    TOutputSchema,
+    EffectErrorMapToErrorMap<TEffectErrorMap>,
+    TMeta,
+    TClientContext
+  >
+): EffectDecoratedProcedure & ProcedureClient
+```
+
+<ParamField path="options" type="CreateProcedureClientOptions">
+  Optional configuration for the client.
+  
+  <ParamField path="context" type="TClientContext | (() => TClientContext)">
+    Context object or function that returns context for each call.
+  </ParamField>
+</ParamField>
+
+<ResponseField name="result" type="EffectDecoratedProcedure & ProcedureClient">
+  A procedure that can be called directly with input and returns a Promise.
+</ResponseField>
+
+#### Usage
+
+```typescript
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input, context }) {
+    const user = yield* UserService.findById(input.id)
+    return user
+  })
+  .callable({
+    context: { requestId: '123' }
+  })
+
+// Can now be called directly
+const user = await getUser({ id: '456' })
+```
+
+#### With dynamic context
+
+```typescript
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input, context }) {
+    console.log('Request ID:', context.requestId)
+    return yield* UserService.findById(input.id)
+  })
+  .callable({
+    context: () => ({ requestId: crypto.randomUUID() })
+  })
+
+const user = await getUser({ id: '456' })
+```
+
+### actionable()
+
+Makes the procedure compatible with server actions (e.g., Next.js Server Actions).
+
+```typescript
+actionable(
+  options?: CreateProcedureClientOptions<
+    TInitialContext,
+    TOutputSchema,
+    EffectErrorMapToErrorMap<TEffectErrorMap>,
+    TMeta,
+    Record<never, never>
+  >
+): EffectDecoratedProcedure & ProcedureActionableClient
+```
+
+<ParamField path="options" type="CreateProcedureClientOptions">
+  Optional configuration for the action client. Context defaults to an empty object.
+</ParamField>
+
+<ResponseField name="result" type="EffectDecoratedProcedure & ProcedureActionableClient">
+  A procedure that can be used as a server action, returning `{ data?, error? }`.
+</ResponseField>
+
+#### Usage
+
+```typescript
+// server-actions.ts
+'use server'
+
+import { effectOs } from './orpc'
+import { z } from 'zod'
+
+export const createUser = effectOs
+  .input(z.object({ name: z.string(), email: z.string() }))
+  .effect(function* ({ input }) {
+    const user = yield* UserService.create(input)
+    return user
+  })
+  .actionable()
+```
+
+```typescript
+// component.tsx
+'use client'
+
+import { createUser } from './server-actions'
+
+export function CreateUserForm() {
+  async function handleSubmit(formData: FormData) {
+    const { data, error } = await createUser({
+      name: formData.get('name') as string,
+      email: formData.get('email') as string
+    })
+    
+    if (error) {
+      console.error('Failed to create user:', error)
+      return
+    }
+    
+    console.log('Created user:', data)
+  }
+  
+  return (
+    <form action={handleSubmit}>
+      {/* form fields */}
+    </form>
+  )
+}
+```
+
+## Using procedures in routers
+
+Procedures are typically used as part of a router:
+
+```typescript
+import { effectOs } from './orpc'
+import { z } from 'zod'
+
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input }) {
+    const user = yield* UserService.findById(input.id)
+    return user
+  })
+
+const listUsers = effectOs
+  .effect(function* () {
+    const users = yield* UserService.list()
+    return users
+  })
+
+const updateUser = effectOs
+  .input(z.object({ id: z.string(), name: z.string() }))
+  .effect(function* ({ input }) {
+    const user = yield* UserService.update(input.id, { name: input.name })
+    return user
+  })
+
+export const router = {
+  users: {
+    get: getUser,
+    list: listUsers,
+    update: updateUser
+  }
+}
+
+export type Router = typeof router
+```
+
+## Error handling patterns
+
+### Yielding tagged errors
+
+```typescript
+class UserNotFoundError extends ORPCTaggedError('UserNotFoundError', {
+  status: 404
+}) {}
+
+const effectOs = makeEffectORPC(runtime)
+  .errors({ UserNotFoundError })
+
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input }) {
+    const user = yield* UserService.findById(input.id)
+    
+    if (!user) {
+      // Yield the error directly
+      return yield* new UserNotFoundError()
+    }
+    
+    return user
+  })
+```
+
+### Using the errors object
+
+```typescript
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .errors({ UserNotFoundError })
+  .effect(function* ({ input, errors }) {
+    const user = yield* UserService.findById(input.id)
+    
+    if (!user) {
+      // Use errors from the handler options
+      return yield* Effect.fail(errors.UserNotFoundError())
+    }
+    
+    return user
+  })
+```
+
+### Catching and transforming errors
+
+```typescript
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .errors({ UserNotFoundError })
+  .effect(function* ({ input }) {
+    const result = yield* UserService.findById(input.id).pipe(
+      Effect.catchTag('DatabaseError', (error) =>
+        Effect.fail(new UserNotFoundError({
+          cause: error,
+          message: 'User lookup failed'
+        }))
+      )
+    )
+    
+    return result
+  })
+```
+
+## Automatic telemetry
+
+All Effect procedures are automatically traced with `Effect.withSpan`. The span name defaults to the procedure's path in the router:
+
+```typescript
+const router = {
+  users: {
+    get: getUser,      // Span: "users.get"
+    list: listUsers    // Span: "users.list"
+  },
+  posts: {
+    get: getPost       // Span: "posts.get"
+  }
+}
+```
+
+Override the span name with `.traced()`:
+
+```typescript
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .traced('custom.span.users.fetch')
+  .effect(function* ({ input }) {
+    // ...
+  })
+```
+
+## Mixing Effect and standard handlers
+
+You can mix Effect procedures (`.effect()`) and standard oRPC procedures (`.handler()`) in the same router:
+
+```typescript
+import { os } from '@orpc/server'
+
+const router = {
+  // Standard oRPC procedure
+  health: os.handler(() => 'ok'),
+  
+  // Effect procedure
+  users: {
+    get: effectOs
+      .input(z.object({ id: z.string() }))
+      .effect(function* ({ input }) {
+        const user = yield* UserService.findById(input.id)
+        return user
+      })
+  },
+  
+  // Another standard procedure
+  version: os.handler(() => ({ version: '1.0.0' }))
+}
+```
+
+## Type inference
+
+Extract types from procedure instances:
+
+```typescript
+import type { InferProcedureInput, InferProcedureOutput } from '@orpc/server'
+
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input }) {
+    return { id: input.id, name: 'John' }
+  })
+
+type Input = InferProcedureInput<typeof getUser>
+// type Input = { id: string }
+
+type Output = InferProcedureOutput<typeof getUser>
+// type Output = { id: string; name: string }
+```
+
+## Related
+
+- [EffectBuilder](/api/effect-builder) - Creating procedures with the builder
+- [makeEffectORPC()](/api/make-effect-orpc) - Creating an EffectBuilder instance
+- [ORPCTaggedError](/api/orpc-tagged-error) - Creating Effect-native error classes

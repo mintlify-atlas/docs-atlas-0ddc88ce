@@ -1,0 +1,655 @@
+---
+title: EffectBuilder
+description: Effect-native procedure builder with full oRPC compatibility
+---
+
+## Overview
+
+`EffectBuilder` is an Effect-aware procedure builder that wraps an oRPC Builder instance and adds Effect-specific capabilities. It preserves all standard oRPC builder methods while enabling Effect procedures with type-safe service injection.
+
+Instances are created via [`makeEffectORPC()`](/api/make-effect-orpc).
+
+## Type parameters
+
+```typescript
+class EffectBuilder<
+  TInitialContext extends Context,
+  TCurrentContext extends Context,
+  TInputSchema extends AnySchema,
+  TOutputSchema extends AnySchema,
+  TEffectErrorMap extends EffectErrorMap,
+  TMeta extends Meta,
+  TRequirementsProvided,
+  TRuntimeError
+>
+```
+
+- `TRequirementsProvided` - Services provided by the ManagedRuntime
+- `TRuntimeError` - Errors that can occur in the runtime
+- Other parameters match standard oRPC builder types
+
+## Configuration methods
+
+These methods set or override initial configuration and return a new builder instance.
+
+### $config()
+
+Sets or overrides the builder configuration.
+
+```typescript
+$config(config: BuilderConfig): EffectBuilder
+```
+
+<ParamField path="config" type="BuilderConfig" required>
+  Configuration object for middleware ordering and validation indexes.
+  
+  <ParamField path="initialInputValidationIndex" type="number">
+    Index where input validation middleware is inserted. Defaults to 0.
+  </ParamField>
+  
+  <ParamField path="initialOutputValidationIndex" type="number">
+    Index where output validation middleware is inserted. Defaults to 0.
+  </ParamField>
+  
+  <ParamField path="dedupeLeadingMiddlewares" type="boolean">
+    Whether to deduplicate leading middlewares when extending. Defaults to `true`.
+  </ParamField>
+</ParamField>
+
+#### Usage
+
+```typescript
+const effectOs = makeEffectORPC(runtime)
+  .$config({
+    initialInputValidationIndex: 1,
+    dedupeLeadingMiddlewares: false
+  })
+```
+
+### $context()
+
+Sets or overrides the initial context type. Resets the middleware stack.
+
+```typescript
+$context<U extends Context>(): EffectBuilder<U, U, ...>
+```
+
+#### Usage
+
+```typescript
+interface AppContext {
+  userId?: string
+  orgId: string
+}
+
+const effectOs = makeEffectORPC(runtime)
+  .$context<AppContext>()
+
+// Procedures now have typed context
+const procedure = effectOs.effect(function* ({ context }) {
+  console.log(context.orgId) // typed as string
+})
+```
+
+### $meta()
+
+Sets or overrides the initial metadata. Replaces any existing metadata.
+
+```typescript
+$meta<U extends Meta>(initialMeta: U): EffectBuilder<..., U, ...>
+```
+
+<ParamField path="initialMeta" type="Meta" required>
+  Metadata object to associate with the builder.
+</ParamField>
+
+#### Usage
+
+```typescript
+const effectOs = makeEffectORPC(runtime)
+  .$meta({ version: '1.0', deprecated: false })
+```
+
+### $route()
+
+Sets or overrides the initial route configuration. Used for OpenAPI integration.
+
+```typescript
+$route(initialRoute: Route): EffectBuilder
+```
+
+<ParamField path="initialRoute" type="Route" required>
+  Route configuration object.
+  
+  <ParamField path="path" type="HTTPPath">
+    HTTP path for the route (e.g., `/users/:id`).
+  </ParamField>
+  
+  <ParamField path="method" type="HTTPMethod">
+    HTTP method (e.g., `GET`, `POST`, `PUT`, `DELETE`).
+  </ParamField>
+  
+  <ParamField path="description" type="string">
+    Description for OpenAPI documentation.
+  </ParamField>
+  
+  <ParamField path="summary" type="string">
+    Summary for OpenAPI documentation.
+  </ParamField>
+  
+  <ParamField path="deprecated" type="boolean">
+    Whether the route is deprecated.
+  </ParamField>
+</ParamField>
+
+#### Usage
+
+```typescript
+const effectOs = makeEffectORPC(runtime)
+  .$route({
+    path: '/api/users',
+    method: 'GET',
+    summary: 'List users'
+  })
+```
+
+### $input()
+
+Sets or overrides the initial input schema.
+
+```typescript
+$input<U extends AnySchema>(initialInputSchema?: U): EffectBuilder<..., U, ...>
+```
+
+<ParamField path="initialInputSchema" type="AnySchema">
+  Standard Schema for initial input validation (e.g., Zod schema).
+</ParamField>
+
+#### Usage
+
+```typescript
+import { z } from 'zod'
+
+const effectOs = makeEffectORPC(runtime)
+  .$input(z.object({ orgId: z.string() }))
+
+// All procedures will validate this input first
+```
+
+## Builder methods
+
+These methods configure the builder incrementally and return a new builder instance.
+
+### errors()
+
+Adds type-safe custom errors. Supports both traditional oRPC error definitions and `ORPCTaggedError` classes.
+
+```typescript
+errors<U extends EffectErrorMap>(
+  errors: U
+): EffectBuilder<..., MergedEffectErrorMap<TEffectErrorMap, U>, ...>
+```
+
+<ParamField path="errors" type="EffectErrorMap" required>
+  Object mapping error keys to either:
+  - Traditional oRPC error items with `status`, `message`, and optional `data` schema
+  - `ORPCTaggedError` class constructors
+</ParamField>
+
+#### Usage
+
+```typescript
+import { ORPCTaggedError } from 'effect-orpc'
+import { z } from 'zod'
+
+class UserNotFoundError extends ORPCTaggedError('UserNotFoundError', {
+  status: 404
+}) {}
+
+const effectOs = makeEffectORPC(runtime)
+  .errors({
+    // Traditional format
+    BAD_REQUEST: { 
+      status: 400, 
+      message: 'Bad request',
+      data: z.object({ fields: z.array(z.string()) })
+    },
+    // Tagged error class
+    UserNotFoundError,
+    // Can also use custom keys
+    USER_NOT_FOUND: UserNotFoundError
+  })
+```
+
+### use()
+
+Adds middleware to modify the context or enhance the pipeline.
+
+```typescript
+use<UOutContext, UInContext = TCurrentContext>(
+  middleware: Middleware<UInContext | TCurrentContext, UOutContext, ...>
+): EffectBuilder<..., MergedCurrentContext<TCurrentContext, UOutContext>, ...>
+```
+
+<ParamField path="middleware" type="Middleware" required>
+  Middleware function that receives context, input, metadata, errors, and calls `next()` to continue the pipeline.
+</ParamField>
+
+<ParamField path="mapInput" type="MapInputMiddleware">
+  Optional function to transform the input before passing to the middleware.
+</ParamField>
+
+#### Usage
+
+```typescript
+const authMiddleware = ({ context, errors, next }) => {
+  if (!context.userId) {
+    throw errors.UNAUTHORIZED()
+  }
+  return next({ context: { ...context, userId: context.userId } })
+}
+
+const effectOs = makeEffectORPC(runtime)
+  .errors({ UNAUTHORIZED: { status: 401 } })
+  .use(authMiddleware)
+```
+
+### meta()
+
+Sets or updates the metadata. The provided metadata is merged with existing metadata.
+
+```typescript
+meta(meta: TMeta): EffectBuilder
+```
+
+<ParamField path="meta" type="Meta" required>
+  Metadata object to merge with existing metadata.
+</ParamField>
+
+#### Usage
+
+```typescript
+const procedure = effectOs
+  .meta({ rateLimit: 100 })
+  .effect(() => Effect.succeed('data'))
+```
+
+### route()
+
+Sets or updates the route definition. The provided route is merged with any existing route.
+
+```typescript
+route(route: Route): EffectBuilder
+```
+
+<ParamField path="route" type="Route" required>
+  Route configuration to merge with existing route.
+</ParamField>
+
+#### Usage
+
+```typescript
+const getUser = effectOs
+  .route({
+    method: 'GET',
+    path: '/users/:id',
+    summary: 'Get user by ID'
+  })
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input }) {
+    // ...
+  })
+```
+
+### input()
+
+Defines the input validation schema.
+
+```typescript
+input<USchema extends AnySchema>(
+  schema: USchema
+): EffectProcedureBuilderWithInput<..., USchema, ...>
+```
+
+<ParamField path="schema" type="AnySchema" required>
+  Standard Schema (e.g., Zod) for validating procedure input.
+</ParamField>
+
+#### Usage
+
+```typescript
+import { z } from 'zod'
+
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input }) {
+    // input is typed as { id: string }
+    console.log(input.id)
+  })
+```
+
+### output()
+
+Defines the output validation schema.
+
+```typescript
+output<USchema extends AnySchema>(
+  schema: USchema
+): EffectBuilder<..., USchema, ...>
+```
+
+<ParamField path="schema" type="AnySchema" required>
+  Standard Schema (e.g., Zod) for validating procedure output.
+</ParamField>
+
+#### Usage
+
+```typescript
+import { z } from 'zod'
+
+const getUser = effectOs
+  .output(z.object({ id: z.string(), name: z.string() }))
+  .effect(function* () {
+    // Return value must match the schema
+    return { id: '1', name: 'John' }
+  })
+```
+
+### traced()
+
+Adds a traceable span to the procedure for telemetry. Captures stack trace at the call site.
+
+```typescript
+traced(spanName: string): EffectBuilder
+```
+
+<ParamField path="spanName" type="string" required>
+  The name of the span for OpenTelemetry tracing (e.g., `users.getUser`). Overrides the default path-based span name.
+</ParamField>
+
+#### Usage
+
+```typescript
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .traced('users.getUser')
+  .effect(function* ({ input }) {
+    const userService = yield* UserService
+    return yield* userService.findById(input.id)
+  })
+```
+
+By default, procedures are traced with a span name derived from their path in the router (e.g., `users.getUser`). Use `.traced()` to override this.
+
+## Handler methods
+
+These methods define the procedure's implementation and return an `EffectDecoratedProcedure`.
+
+### effect()
+
+Defines the handler of the procedure using an Effect. The Effect is executed using the ManagedRuntime provided during builder creation.
+
+```typescript
+effect<UFuncOutput>(
+  effectFn: EffectProcedureHandler<
+    TCurrentContext,
+    TInputSchema,
+    UFuncOutput,
+    TEffectErrorMap,
+    TRequirementsProvided,
+    TMeta
+  >
+): EffectDecoratedProcedure<..., Schema<UFuncOutput, UFuncOutput>, ...>
+```
+
+<ParamField path="effectFn" type="EffectProcedureHandler" required>
+  Generator function that yields Effects. Receives an options object with:
+  
+  <ParamField path="context" type="TCurrentContext">
+    The current context from middleware.
+  </ParamField>
+  
+  <ParamField path="input" type="InferSchemaOutput<TInputSchema>">
+    The validated input data.
+  </ParamField>
+  
+  <ParamField path="path" type="string[]">
+    The procedure's path as an array (e.g., `['users', 'getUser']`).
+  </ParamField>
+  
+  <ParamField path="procedure" type="ProcedureDef">
+    The procedure definition object.
+  </ParamField>
+  
+  <ParamField path="signal" type="AbortSignal">
+    Abort signal for cancellation.
+  </ParamField>
+  
+  <ParamField path="errors" type="EffectErrorConstructorMap">
+    Typed error constructors from the error map.
+  </ParamField>
+</ParamField>
+
+<ResponseField name="EffectDecoratedProcedure" type="EffectDecoratedProcedure">
+  A procedure instance that can be called directly, used in routers, or further configured.
+</ResponseField>
+
+#### Usage
+
+```typescript
+import { Effect } from 'effect'
+import { z } from 'zod'
+
+class UserService extends Effect.Service<UserService>()("UserService", {
+  accessors: true,
+  sync: () => ({
+    findById: (id: string) => Effect.succeed({ id, name: 'John' })
+  })
+}) {}
+
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input, context }) {
+    // Yield services from the runtime
+    const userService = yield* UserService
+    
+    // Yield Effects
+    const user = yield* userService.findById(input.id)
+    
+    // Return the result
+    return user
+  })
+```
+
+#### Error handling in effects
+
+```typescript
+class UserNotFoundError extends ORPCTaggedError('UserNotFoundError', {
+  status: 404
+}) {}
+
+const effectOs = makeEffectORPC(runtime)
+  .errors({ UserNotFoundError })
+
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input, errors }) {
+    const user = yield* UserService.findById(input.id)
+    
+    if (!user) {
+      // Yield an error directly
+      return yield* new UserNotFoundError()
+      
+      // Or use the errors object
+      // return yield* Effect.fail(errors.UserNotFoundError())
+    }
+    
+    return user
+  })
+```
+
+### handler()
+
+Defines a standard oRPC handler (non-Effect). Useful for mixing Effect and non-Effect procedures.
+
+```typescript
+handler<UFuncOutput>(
+  handler: ProcedureHandler<
+    TCurrentContext,
+    InferSchemaOutput<TInputSchema>,
+    UFuncOutput,
+    EffectErrorMapToErrorMap<TEffectErrorMap>,
+    TMeta
+  >
+): EffectDecoratedProcedure<..., Schema<UFuncOutput, UFuncOutput>, ...>
+```
+
+<ParamField path="handler" type="ProcedureHandler" required>
+  Standard oRPC handler function (not a generator). Can be sync or async.
+</ParamField>
+
+#### Usage
+
+```typescript
+const health = effectOs.handler(() => 'ok')
+
+const version = effectOs.handler(async () => {
+  const pkg = await readPackageJson()
+  return { version: pkg.version }
+})
+```
+
+## Router methods
+
+These methods apply the builder's configuration to routers.
+
+### prefix()
+
+Prefixes all procedures in the router for OpenAPI.
+
+```typescript
+prefix(prefix: HTTPPath): EffectRouterBuilder
+```
+
+<ParamField path="prefix" type="HTTPPath" required>
+  Path prefix to prepend to all procedure routes (e.g., `/api/v1`).
+</ParamField>
+
+#### Usage
+
+```typescript
+const apiRouter = effectOs
+  .prefix('/api/v1')
+  .router({
+    users: {
+      get: getUser  // Will be at /api/v1/users/get
+    }
+  })
+```
+
+### tag()
+
+Adds tags to all procedures in the router for OpenAPI grouping.
+
+```typescript
+tag(...tags: string[]): EffectRouterBuilder
+```
+
+<ParamField path="tags" type="string[]" required>
+  One or more tags to add to all procedures.
+</ParamField>
+
+#### Usage
+
+```typescript
+const usersRouter = effectOs
+  .tag('Users', 'v1')
+  .router({
+    get: getUser,
+    list: listUsers
+  })
+```
+
+### router()
+
+Applies all previously defined options to the specified router.
+
+```typescript
+router<U extends Router>(
+  router: U
+): EnhancedEffectRouter<U, TInitialContext, TCurrentContext, TEffectErrorMap>
+```
+
+<ParamField path="router" type="Router" required>
+  An oRPC router object with procedures and nested routers.
+</ParamField>
+
+#### Usage
+
+```typescript
+const usersRouter = {
+  get: getUser,
+  list: listUsers,
+  update: updateUser
+}
+
+const enhancedRouter = effectOs
+  .errors({ NOT_FOUND: { status: 404 } })
+  .use(loggingMiddleware)
+  .router(usersRouter)
+```
+
+### lazy()
+
+Creates a lazy-loaded router with applied options.
+
+```typescript
+lazy<U extends Router>(
+  loader: () => Promise<{ default: U }>
+): EnhancedEffectRouter<Lazy<U>, ...>
+```
+
+<ParamField path="loader" type="() => Promise<{ default: Router }>" required>
+  Async function that returns a module with a default export containing the router.
+</ParamField>
+
+#### Usage
+
+```typescript
+const lazyUsersRouter = effectOs.lazy(
+  () => import('./routes/users')
+)
+
+const router = {
+  users: lazyUsersRouter,
+  posts: lazyPostsRouter
+}
+```
+
+## Type inference helpers
+
+These types extract information from a builder instance:
+
+```typescript
+import type {
+  InferBuilderInitialContext,
+  InferBuilderCurrentContext,
+  InferBuilderInputSchema,
+  InferBuilderOutputSchema,
+  InferBuilderErrorMap,
+  InferBuilderMeta
+} from 'effect-orpc'
+
+type InitialCtx = InferBuilderInitialContext<typeof effectOs>
+type CurrentCtx = InferBuilderCurrentContext<typeof effectOs>
+type InputSchema = InferBuilderInputSchema<typeof effectOs>
+type OutputSchema = InferBuilderOutputSchema<typeof effectOs>
+type ErrorMap = InferBuilderErrorMap<typeof effectOs>
+type Meta = InferBuilderMeta<typeof effectOs>
+```
+
+## Related
+
+- [makeEffectORPC()](/api/make-effect-orpc) - Creating an EffectBuilder instance
+- [EffectDecoratedProcedure](/api/effect-procedure) - The result of calling `.effect()` or `.handler()`
+- [ORPCTaggedError](/api/orpc-tagged-error) - Creating Effect-native error classes

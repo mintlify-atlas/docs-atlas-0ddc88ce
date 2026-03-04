@@ -1,0 +1,165 @@
+---
+title: Creating procedures
+description: Learn how to create Effect-native procedures with type-safe service injection
+---
+
+Effect-orpc allows you to write oRPC procedures using Effect's generator syntax with `yield*`, providing full type safety and service injection capabilities.
+
+## Basic procedure creation
+
+To create Effect procedures, you first need to set up a runtime and create an Effect-aware builder.
+
+<Steps>
+  <Step title="Create a ManagedRuntime">
+    Create a `ManagedRuntime` to provide services for your procedures:
+
+    ```ts
+    import { Effect, Layer, ManagedRuntime } from "effect";
+    import { makeEffectORPC } from "effect-orpc";
+
+    // Create runtime with your services
+    const runtime = ManagedRuntime.make(Layer.empty);
+
+    // Create Effect-aware oRPC builder
+    const effectOs = makeEffectORPC(runtime);
+    ```
+  </Step>
+
+  <Step title="Define a procedure with .effect()">
+    Use the `.effect()` method to define procedures with Effect generators:
+
+    ```ts
+    const hello = effectOs.effect(function* () {
+      return yield* Effect.succeed("Hello, world!");
+    });
+    ```
+  </Step>
+
+  <Step title="Add input and output validation">
+    Use `.input()` and `.output()` to define validation schemas:
+
+    ```ts
+    import z from "zod";
+
+    const greet = effectOs
+      .input(z.object({ name: z.string() }))
+      .output(z.string())
+      .effect(function* ({ input }) {
+        return yield* Effect.succeed(`Hello, ${input.name}!`);
+      });
+    ```
+  </Step>
+</Steps>
+
+## Using services in procedures
+
+Effect-orpc enforces compile-time safety for services - you can only use services provided by your `ManagedRuntime`.
+
+### Define services
+
+Create Effect services using `Effect.Service` or `Context.Tag`:
+
+```ts
+import { Context, Effect } from "effect";
+
+class UserService extends Effect.Service<UserService>()("UserService", {
+  accessors: true,
+  sync: () => ({
+    findById: (id: number) => users.find((u) => u.id === id),
+  }),
+}) {}
+```
+
+### Provide services to the runtime
+
+Add your services to the runtime layer:
+
+```ts
+const runtime = ManagedRuntime.make(UserService.Default);
+const effectOs = makeEffectORPC(runtime);
+```
+
+### Access services in procedures
+
+Yield services directly in your Effect procedures:
+
+```ts
+const getUser = effectOs
+  .input(z.object({ id: z.number() }))
+  .effect(function* ({ input }) {
+    const user = yield* UserService.get(input.id);
+    if (!user) {
+      return yield* Effect.fail(new Error("User not found"));
+    }
+    return user;
+  });
+```
+
+<Note>
+  If you try to use a service that isn't in the runtime, you'll get a compile-time error.
+</Note>
+
+## Wrapping existing builders
+
+You can wrap an existing oRPC builder to add Effect support while preserving middleware, context, and error handling:
+
+```ts
+import { os } from "@orpc/server";
+
+// Create a customized builder with middleware
+const authedOs = os
+  .errors({ UNAUTHORIZED: { status: 401 } })
+  .$context<{ userId?: number }>()
+  .use(({ context, errors, next }) => {
+    if (context.userId === undefined) throw errors.UNAUTHORIZED();
+    return next({ context: { ...context, userId: context.userId } });
+  });
+
+// Wrap it with Effect support
+const effectAuthedOs = makeEffectORPC(runtime, authedOs);
+
+const getMe = effectAuthedOs.effect(function* ({ context: { userId } }) {
+  const user = yield* UserService.get(userId);
+  return user;
+});
+```
+
+## Adding metadata and routes
+
+Use builder methods to configure procedures for OpenAPI integration:
+
+```ts
+const createUser = effectOs
+  .input(z.object({ name: z.string() }))
+  .meta({ auth: true })
+  .route({ path: "/users", method: "POST" })
+  .effect(function* ({ input }) {
+    const user = yield* UserService.create(input.name);
+    return user;
+  });
+```
+
+## Handler context and options
+
+The Effect handler receives an options object with:
+
+- `context` - The current context from middleware
+- `input` - The validated input
+- `path` - The procedure path (e.g., `["users", "getById"]`)
+- `procedure` - The procedure definition
+- `signal` - An AbortSignal for cancellation
+- `errors` - Typed error constructors
+
+```ts
+const procedure = effectOs
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input, context, path, signal }) {
+    // Access all handler options
+    console.log("Called:", path.join("."));
+    return yield* UserService.findById(input.id);
+  });
+```
+
+<Tip>
+  All Effect procedures are automatically traced with OpenTelemetry. See the [OpenTelemetry guide](/guides/opentelemetry) for more details.
+</Tip>

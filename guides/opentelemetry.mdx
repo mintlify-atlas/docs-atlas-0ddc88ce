@@ -1,0 +1,288 @@
+---
+title: OpenTelemetry
+description: Automatic tracing for Effect procedures with OpenTelemetry integration
+---
+
+All Effect procedures in effect-orpc are automatically traced using `Effect.withSpan`, providing built-in OpenTelemetry support for observability.
+
+## Automatic tracing
+
+Every Effect procedure is wrapped with a trace span without any additional configuration:
+
+```ts
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input }) {
+    const userService = yield* UserService;
+    return yield* userService.findById(input.id);
+  });
+
+// Automatically traced with span name based on procedure path
+```
+
+## Default span names
+
+Span names are automatically derived from the router structure:
+
+```ts
+const router = {
+  users: {
+    // Span name: "users.get"
+    get: effectOs.input(z.object({ id: z.string() })).effect(function* ({
+      input,
+    }) {
+      const userService = yield* UserService;
+      return yield* userService.findById(input.id);
+    }),
+    // Span name: "users.create"
+    create: effectOs.input(z.object({ name: z.string() })).effect(function* ({
+      input,
+    }) {
+      const userService = yield* UserService;
+      return yield* userService.create(input.name);
+    }),
+  },
+};
+```
+
+## Custom span names
+
+Use `.traced()` to override the default span name:
+
+```ts
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .traced("custom.span.name") // Override the default path-based name
+  .effect(function* ({ input }) {
+    const userService = yield* UserService;
+    return yield* userService.findById(input.id);
+  });
+```
+
+### Semantic span names
+
+Use descriptive names that reflect the operation:
+
+```ts
+const processPayment = effectOs
+  .input(z.object({ amount: z.number(), userId: z.string() }))
+  .traced("payment.process") // Semantic name
+  .effect(function* ({ input }) {
+    const payment = yield* PaymentService.charge(input.amount, input.userId);
+    return payment;
+  });
+```
+
+## Enabling OpenTelemetry
+
+<Steps>
+  <Step title="Install OpenTelemetry dependencies">
+    ```bash
+    npm install @effect/opentelemetry @opentelemetry/exporter-trace-otlp-http @opentelemetry/sdk-trace-base
+    ```
+  </Step>
+
+  <Step title="Create the tracing layer">
+    ```ts
+    import { NodeSdk } from "@effect/opentelemetry";
+    import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+    import { SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
+    import { Effect, Layer } from "effect";
+
+    const TracingLive = NodeSdk.layer(
+      Effect.sync(() => ({
+        resource: { serviceName: "my-service" },
+        spanProcessor: [new SimpleSpanProcessor(new OTLPTraceExporter())],
+      })),
+    );
+    ```
+  </Step>
+
+  <Step title="Add tracing to your runtime">
+    ```ts
+    import { ManagedRuntime } from "effect";
+
+    const AppLive = Layer.mergeAll(UserServiceLive, TracingLive);
+
+    const runtime = ManagedRuntime.make(AppLive);
+    const effectOs = makeEffectORPC(runtime);
+    ```
+  </Step>
+</Steps>
+
+## Error stack traces
+
+When an Effect procedure fails, the span includes a properly formatted stack trace:
+
+```
+MyCustomError: Something went wrong
+    at <anonymous> (/app/src/procedures.ts:42:28)
+    at users.getById (/app/src/procedures.ts:41:35)
+```
+
+The stack trace points to the definition site of the procedure for easier debugging.
+
+## Stack trace capture
+
+Stack traces are captured at procedure definition time:
+
+```ts
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .traced("users.getUser")
+  .effect(function* ({ input }) {
+    // Stack trace will point to this definition site
+    const userService = yield* UserService;
+    return yield* userService.findById(input.id);
+  });
+```
+
+## Configuring exporters
+
+### OTLP HTTP exporter
+
+Export traces to an OTLP-compatible backend (Jaeger, Tempo, etc.):
+
+```ts
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+
+const TracingLive = NodeSdk.layer(
+  Effect.sync(() => ({
+    resource: { serviceName: "my-api" },
+    spanProcessor: [
+      new SimpleSpanProcessor(
+        new OTLPTraceExporter({
+          url: "http://localhost:4318/v1/traces",
+        }),
+      ),
+    ],
+  })),
+);
+```
+
+### Console exporter
+
+Use the console exporter for development:
+
+```ts
+import { ConsoleSpanExporter } from "@opentelemetry/sdk-trace-base";
+
+const TracingLive = NodeSdk.layer(
+  Effect.sync(() => ({
+    resource: { serviceName: "my-api-dev" },
+    spanProcessor: [new SimpleSpanProcessor(new ConsoleSpanExporter())],
+  })),
+);
+```
+
+### Batch span processor
+
+For production, use batch processing for better performance:
+
+```ts
+import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
+
+const TracingLive = NodeSdk.layer(
+  Effect.sync(() => ({
+    resource: { serviceName: "my-api-prod" },
+    spanProcessor: [
+      new BatchSpanProcessor(
+        new OTLPTraceExporter({
+          url: process.env.OTLP_ENDPOINT,
+        }),
+      ),
+    ],
+  })),
+);
+```
+
+## Nested spans
+
+Service operations automatically create nested spans:
+
+```ts
+class UserService extends Effect.Service<UserService>()("UserService", {
+  accessors: true,
+  effect: Effect.gen(function* () {
+    const db = yield* DatabaseService;
+
+    return {
+      findById: (id: number) =>
+        // This creates a nested span under the procedure span
+        Effect.withSpan(
+          db.query(`SELECT * FROM users WHERE id = ${id}`),
+          "UserService.findById",
+        ),
+    };
+  }),
+}) {}
+```
+
+## Adding span attributes
+
+Enrich spans with custom attributes:
+
+```ts
+import { Effect } from "effect";
+
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .traced("users.getUser")
+  .effect(function* ({ input }) {
+    return yield* Effect.gen(function* () {
+      const userService = yield* UserService;
+      const user = yield* userService.findById(input.id);
+
+      // Add custom attributes
+      yield* Effect.annotateCurrentSpan("user.id", input.id);
+      yield* Effect.annotateCurrentSpan("user.found", !!user);
+
+      return user;
+    });
+  });
+```
+
+## Best practices
+
+### Use semantic span names
+
+```ts
+// ✅ Good - describes the operation
+const procedure = effectOs.traced("payment.process").effect(/* ... */);
+
+// ❌ Avoid - too generic
+const procedure = effectOs.traced("handler").effect(/* ... */);
+```
+
+### Match span names to business operations
+
+```ts
+const router = {
+  orders: {
+    // Span: "orders.create"
+    create: effectOs.traced("orders.create").effect(/* ... */),
+    // Span: "orders.fulfill"
+    fulfill: effectOs.traced("orders.fulfill").effect(/* ... */),
+    // Span: "orders.cancel"
+    cancel: effectOs.traced("orders.cancel").effect(/* ... */),
+  },
+};
+```
+
+### Add context to spans
+
+```ts
+const procedure = effectOs.effect(function* ({ input }) {
+  yield* Effect.annotateCurrentSpan("operation.type", "read");
+  yield* Effect.annotateCurrentSpan("input.id", input.id);
+  // ...
+});
+```
+
+<Tip>
+  Use `.traced()` for procedures that need custom span names, but rely on automatic path-based naming for most procedures.
+</Tip>
+
+<Note>
+  Tracing is enabled by default for all Effect procedures. You only need to configure the OpenTelemetry layer to export traces.
+</Note>

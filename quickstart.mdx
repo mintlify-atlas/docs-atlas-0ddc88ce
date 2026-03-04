@@ -1,80 +1,232 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Build your first Effect-native oRPC procedure in minutes with effect-orpc
 ---
 
-## Get started in three steps
+Get up and running with effect-orpc by building a complete working example with services, tagged errors, and Effect procedures.
 
-Get your documentation site running locally and make your first customization.
+<Steps>
+  <Step title="Install effect-orpc">
+    Install effect-orpc and its peer dependencies using your preferred package manager.
 
-### Step 1: Set up your local environment
+    <CodeGroup>
+    ```bash npm
+    npm install effect-orpc effect @orpc/server
+    ```
+    ```bash pnpm
+    pnpm add effect-orpc effect @orpc/server
+    ```
+    ```bash yarn
+    yarn add effect-orpc effect @orpc/server
+    ```
+    ```bash bun
+    bun add effect-orpc effect @orpc/server
+    ```
+    </CodeGroup>
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+    <Note>
+      You'll also need a schema validation library like `zod` for input/output validation.
+    </Note>
+  </Step>
 
-### Step 2: Deploy your changes
+  <Step title="Set up your runtime and services">
+    Create an Effect service to manage your application logic. In this example, we'll create a simple user repository service.
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```typescript
+    import { Effect, ManagedRuntime } from "effect";
+    import { os } from "@orpc/server";
+    import { makeEffectORPC, ORPCTaggedError } from "effect-orpc";
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    interface User {
+      id: number;
+      name: string;
+    }
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    let users: User[] = [
+      { id: 1, name: "John Doe" },
+      { id: 2, name: "Jane Doe" },
+      { id: 3, name: "James Dane" },
+    ];
 
-### Step 3: Go live
+    // Define your service
+    class UsersRepo extends Effect.Service<UsersRepo>()("UsersRepo", {
+      accessors: true,
+      sync: () => ({
+        get: (id: number) => users.find((u) => u.id === id),
+      }),
+    }) {}
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    // Create runtime with your services
+    const runtime = ManagedRuntime.make(UsersRepo.Default);
+    ```
+
+    The `ManagedRuntime` provides type-safe service injection to your procedures. Any service included in the runtime can be accessed in your Effect procedures.
+  </Step>
+
+  <Step title="Create tagged errors">
+    Define custom error classes using `ORPCTaggedError` for type-safe error handling.
+
+    ```typescript
+    // Create a yieldable oRPC error class
+    class UserNotFoundError extends ORPCTaggedError("UserNotFoundError", {
+      status: 404,
+    }) {}
+    ```
+
+    Tagged errors can be yielded directly in Effect generators and automatically integrate with oRPC's error handling system.
+  </Step>
+
+  <Step title="Create the Effect-aware builder">
+    Use `makeEffectORPC` to create a procedure builder that integrates your runtime and errors.
+
+    ```typescript
+    // Create Effect-aware oRPC builder
+    const effectOs = makeEffectORPC(runtime).errors({
+      UserNotFoundError,
+    });
+    ```
+
+    You can also base your Effect builder on an existing oRPC builder to inherit middleware, context, and other configurations:
+
+    ```typescript
+    // Optional: authenticated base builder
+    const authedOs = os
+      .errors({ UNAUTHORIZED: { status: 401 } })
+      .$context<{ userId?: number }>()
+      .use(({ context, errors, next }) => {
+        if (context.userId === undefined) throw errors.UNAUTHORIZED();
+        return next({ context: { ...context, userId: context.userId } });
+      });
+
+    const effectOs = makeEffectORPC(runtime, authedOs).errors({
+      UserNotFoundError,
+    });
+    ```
+  </Step>
+
+  <Step title="Create your first Effect procedure">
+    Write procedures using Effect generators with `yield*` syntax to access services and handle errors.
+
+    ```typescript
+    const getUser = effectOs.effect(function* ({ context: { userId } }) {
+      // Access the service using yield*
+      const user = yield* UsersRepo.get(userId);
+      
+      // Yield errors for type-safe error handling
+      if (!user) {
+        return yield* new UserNotFoundError();
+      }
+      
+      return user;
+    });
+    ```
+
+    Effect procedures work just like standard oRPC procedures but with full Effect integration, including service injection and tagged error support.
+  </Step>
+
+  <Step title="Build your router">
+    Create your router by combining Effect procedures with standard oRPC procedures.
+
+    ```typescript
+    export const router = {
+      // Standard oRPC procedure
+      health: os.handler(() => "ok"),
+      
+      // Effect procedures with service injection
+      users: {
+        me: getUser,
+      },
+    };
+
+    export type Router = typeof router;
+    ```
+
+    You can mix Effect procedures and standard oRPC procedures in the same router for maximum flexibility.
+  </Step>
+</Steps>
+
+## Complete example
+
+Here's the full working example combining all the steps above:
+
+```typescript
+import { os } from "@orpc/server";
+import { Effect, ManagedRuntime } from "effect";
+import { makeEffectORPC, ORPCTaggedError } from "effect-orpc";
+
+interface User {
+  id: number;
+  name: string;
+}
+
+let users: User[] = [
+  { id: 1, name: "John Doe" },
+  { id: 2, name: "Jane Doe" },
+  { id: 3, name: "James Dane" },
+];
+
+// Authenticated os with initial context & errors set
+const authedOs = os
+  .errors({ UNAUTHORIZED: { status: 401 } })
+  .$context<{ userId?: number }>()
+  .use(({ context, errors, next }) => {
+    if (context.userId === undefined) throw errors.UNAUTHORIZED();
+    return next({ context: { ...context, userId: context.userId } });
+  });
+
+// Define your services
+class UsersRepo extends Effect.Service<UsersRepo>()("UsersRepo", {
+  accessors: true,
+  sync: () => ({
+    get: (id: number) => users.find((u) => u.id === id),
+  }),
+}) {}
+
+// Special yieldable oRPC error class
+class UserNotFoundError extends ORPCTaggedError("UserNotFoundError", {
+  status: 404,
+}) {}
+
+// Create runtime with your services
+const runtime = ManagedRuntime.make(UsersRepo.Default);
+
+// Create Effect-aware oRPC builder
+const effectOs = makeEffectORPC(runtime, authedOs).errors({
+  UserNotFoundError,
+});
+
+// Create the router with mixed procedures
+export const router = {
+  health: os.handler(() => "ok"),
+  users: {
+    me: effectOs.effect(function* ({ context: { userId } }) {
+      const user = yield* UsersRepo.get(userId);
+      if (!user) {
+        return yield* new UserNotFoundError();
+      }
+      return user;
+    }),
+  },
+};
+
+export type Router = typeof router;
+```
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
+Now that you have a working Effect-native oRPC procedure, explore more advanced features:
 
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Using services" icon="plug" href="/guides/using-services">
+    Learn how to define and use Effect services in your procedures
+  </Card>
+  <Card title="Error management" icon="triangle-exclamation" href="/guides/error-management">
+    Master tagged errors and type-safe error handling
+  </Card>
+  <Card title="OpenTelemetry tracing" icon="chart-line" href="/guides/opentelemetry">
+    Add distributed tracing to your procedures
+  </Card>
+  <Card title="API reference" icon="book" href="/api/make-effect-orpc">
+    Explore the complete API documentation
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

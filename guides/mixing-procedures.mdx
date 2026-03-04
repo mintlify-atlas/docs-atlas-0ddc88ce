@@ -1,0 +1,355 @@
+---
+title: Mixing procedures
+description: Combine Effect procedures with standard oRPC procedures in the same router
+---
+
+Effect-orpc allows you to mix Effect-native procedures with standard oRPC procedures in the same router, giving you flexibility to adopt Effect gradually.
+
+## Basic mixing
+
+You can use both Effect procedures and standard handlers in a single router:
+
+```ts
+import { os } from "@orpc/server";
+import { Effect, ManagedRuntime } from "effect";
+import { makeEffectORPC } from "effect-orpc";
+
+const runtime = ManagedRuntime.make(Layer.empty);
+const effectOs = makeEffectORPC(runtime);
+
+export const router = {
+  // Standard oRPC procedure
+  health: os.handler(() => "ok"),
+
+  // Effect procedure
+  users: {
+    me: effectOs.effect(function* ({ context: { userId } }) {
+      const user = yield* UsersRepo.get(userId);
+      if (!user) {
+        return yield* new UserNotFoundError();
+      }
+      return user;
+    }),
+  },
+};
+
+export type Router = typeof router;
+```
+
+## Using different builders
+
+You can create multiple builders with different configurations:
+
+```ts
+import { os } from "@orpc/server";
+
+// Standard builder for simple handlers
+const publicOs = os;
+
+// Authenticated builder
+const authedOs = os
+  .errors({ UNAUTHORIZED: { status: 401 } })
+  .$context<{ userId?: number }>()
+  .use(({ context, errors, next }) => {
+    if (context.userId === undefined) throw errors.UNAUTHORIZED();
+    return next({ context: { ...context, userId: context.userId } });
+  });
+
+// Effect-aware authenticated builder
+const effectAuthedOs = makeEffectORPC(runtime, authedOs);
+
+const router = {
+  // Public endpoints
+  health: publicOs.handler(() => "ok"),
+  ping: publicOs.handler(() => "pong"),
+
+  // Authenticated Effect endpoints
+  users: {
+    me: effectAuthedOs.effect(function* ({ context: { userId } }) {
+      const user = yield* UsersRepo.get(userId);
+      return user;
+    }),
+
+    // Standard authenticated endpoint
+    logout: authedOs.handler(() => {
+      // Standard handler logic
+      return { success: true };
+    }),
+  },
+};
+```
+
+## Sharing middleware
+
+Middleware defined on the base builder is inherited by Effect procedures:
+
+```ts
+const baseOs = os
+  .use(loggingMiddleware)
+  .use(authMiddleware);
+
+const effectOs = makeEffectORPC(runtime, baseOs);
+
+const router = {
+  // Both procedures use the same middleware
+  standard: baseOs.handler(() => "standard"),
+  effect: effectOs.effect(function* () {
+    return yield* Effect.succeed("effect");
+  }),
+};
+```
+
+## Combining error maps
+
+You can share error definitions between standard and Effect procedures:
+
+```ts
+import { ORPCTaggedError } from "effect-orpc";
+
+class UserNotFoundError extends ORPCTaggedError("UserNotFoundError", {
+  status: 404,
+}) {}
+
+const sharedErrors = {
+  UNAUTHORIZED: { status: 401 },
+  UserNotFoundError,
+};
+
+const baseOs = os.errors(sharedErrors);
+const effectOs = makeEffectORPC(runtime, baseOs);
+
+const router = {
+  // Can use UNAUTHORIZED error
+  standard: baseOs.handler(({ errors }) => {
+    throw errors.UNAUTHORIZED();
+  }),
+
+  // Can use both errors
+  effect: effectOs.effect(function* ({ errors }) {
+    // Use tagged error
+    return yield* new UserNotFoundError();
+    // Or use standard error
+    // throw errors.UNAUTHORIZED();
+  }),
+};
+```
+
+## Nested routers
+
+Organize mixed procedures into nested router structures:
+
+```ts
+const publicRouter = {
+  health: os.handler(() => "ok"),
+  status: os.handler(() => ({ uptime: process.uptime() })),
+};
+
+const userRouter = {
+  me: effectOs.effect(function* ({ context: { userId } }) {
+    return yield* UserService.findById(userId);
+  }),
+  update: effectOs
+    .input(z.object({ name: z.string() }))
+    .effect(function* ({ input, context: { userId } }) {
+      return yield* UserService.update(userId, input.name);
+    }),
+};
+
+const adminRouter = {
+  users: os
+    .handler(({ input }) => {
+      // Standard handler for listing users
+      return db.users.findAll();
+    }),
+};
+
+export const router = {
+  public: publicRouter,
+  users: userRouter,
+  admin: adminRouter,
+};
+```
+
+## Gradual adoption
+
+Start with standard procedures and migrate to Effect incrementally:
+
+<Steps>
+  <Step title="Start with standard procedures">
+    ```ts
+    const router = {
+      users: {
+        get: os.handler(({ input }) => {
+          return db.users.findById(input.id);
+        }),
+      },
+    };
+    ```
+  </Step>
+
+  <Step title="Add Effect runtime and builder">
+    ```ts
+    const runtime = ManagedRuntime.make(Layer.empty);
+    const effectOs = makeEffectORPC(runtime);
+    ```
+  </Step>
+
+  <Step title="Migrate individual procedures">
+    ```ts
+    const router = {
+      users: {
+        // Migrated to Effect
+        get: effectOs.effect(function* ({ input }) {
+          return yield* UserService.findById(input.id);
+        }),
+
+        // Still using standard handler
+        list: os.handler(() => {
+          return db.users.findAll();
+        }),
+      },
+    };
+    ```
+  </Step>
+
+  <Step title="Add services progressively">
+    ```ts
+    const UserServiceLive = Layer.succeed(UserService, /* ... */);
+    const runtime = ManagedRuntime.make(UserServiceLive);
+
+    const router = {
+      users: {
+        // Now uses UserService
+        get: effectOs.effect(function* ({ input }) {
+          return yield* UserService.findById(input.id);
+        }),
+
+        // Can still mix with standard handlers
+        list: os.handler(() => db.users.findAll()),
+      },
+    };
+    ```
+  </Step>
+</Steps>
+
+## When to use each approach
+
+### Use standard procedures when:
+
+- The operation is simple and doesn't need effects
+- You're working with synchronous code
+- You don't need service injection
+- You want minimal overhead
+
+```ts
+const health = os.handler(() => "ok");
+const ping = os.handler(() => ({ timestamp: Date.now() }));
+```
+
+### Use Effect procedures when:
+
+- You need service injection
+- The operation involves async effects
+- You want comprehensive error handling
+- You need tracing and observability
+
+```ts
+const getUser = effectOs.effect(function* ({ input }) {
+  const db = yield* DatabaseService;
+  const cache = yield* CacheService;
+
+  const cached = yield* cache.get(`user:${input.id}`);
+  if (cached) return cached;
+
+  const user = yield* db.findById(input.id);
+  yield* cache.set(`user:${input.id}`, user);
+  return user;
+});
+```
+
+## Type safety across procedures
+
+Both procedure types maintain full type safety:
+
+```ts
+const router = {
+  standard: os
+    .input(z.object({ id: z.string() }))
+    .handler(({ input }) => {
+      // input is typed as { id: string }
+      return { id: input.id };
+    }),
+
+  effect: effectOs
+    .input(z.object({ id: z.string() }))
+    .effect(function* ({ input }) {
+      // input is typed as { id: string }
+      return yield* Effect.succeed({ id: input.id });
+    }),
+};
+
+export type Router = typeof router;
+```
+
+## Best practices
+
+### Organize by feature, not by type
+
+```ts
+// ✅ Good - organized by domain
+const router = {
+  users: {
+    list: os.handler(/* ... */),
+    get: effectOs.effect(/* ... */),
+  },
+  posts: {
+    list: os.handler(/* ... */),
+    create: effectOs.effect(/* ... */),
+  },
+};
+
+// ❌ Avoid - organized by procedure type
+const router = {
+  standard: {
+    usersList: os.handler(/* ... */),
+    postsList: os.handler(/* ... */),
+  },
+  effect: {
+    usersGet: effectOs.effect(/* ... */),
+    postsCreate: effectOs.effect(/* ... */),
+  },
+};
+```
+
+### Share common configuration
+
+```ts
+const baseConfig = {
+  errors: { UNAUTHORIZED: { status: 401 } },
+  middleware: [loggingMiddleware, authMiddleware],
+};
+
+const baseOs = os.errors(baseConfig.errors).use(baseConfig.middleware[0]);
+const effectOs = makeEffectORPC(runtime, baseOs);
+```
+
+### Use consistent naming
+
+```ts
+const router = {
+  users: {
+    list: os.handler(/* ... */),     // Standard
+    get: effectOs.effect(/* ... */),  // Effect
+    create: effectOs.effect(/* ... */), // Effect
+    delete: os.handler(/* ... */),   // Standard
+  },
+};
+```
+
+<Tip>
+  Start with standard procedures for simple cases and migrate to Effect as your needs grow more complex.
+</Tip>
+
+<Note>
+  Both procedure types can coexist in the same router and share middleware, context, and error definitions.
+</Note>

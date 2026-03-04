@@ -1,0 +1,170 @@
+---
+title: Effect procedures
+description: Learn how to write oRPC procedures using Effect's generator syntax with yield* for elegant async error handling
+---
+
+Effect procedures allow you to write oRPC handlers using Effect's powerful generator syntax with `yield*`. This approach provides elegant error handling, dependency injection, and seamless integration with the Effect ecosystem.
+
+## Creating Effect procedures
+
+You create Effect procedures using the `.effect()` method on an Effect-aware builder. The handler is a generator function that uses `yield*` to work with Effect values:
+
+```typescript
+import { makeEffectORPC } from "effect-orpc";
+import { Effect, ManagedRuntime, Layer } from "effect";
+import { z } from "zod";
+
+const runtime = ManagedRuntime.make(Layer.empty);
+const effectOs = makeEffectORPC(runtime);
+
+const hello = effectOs.effect(function* () {
+  return "Hello, World!";
+});
+```
+
+## Using the generator syntax
+
+The generator syntax with `yield*` allows you to compose Effect operations naturally:
+
+```typescript
+const add = effectOs.effect(function* () {
+  const a = yield* Effect.succeed(10);
+  const b = yield* Effect.succeed(20);
+  return a + b; // Returns 30
+});
+```
+
+<Note>
+The `yield*` operator unwraps Effect values, similar to `await` for Promises, but with type-safe error handling built in.
+</Note>
+
+## Accessing handler options
+
+Your Effect handler receives the same options as standard oRPC handlers, including input, context, and path:
+
+```typescript
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input, context, path }) {
+    // input: { id: string }
+    // context: your context type
+    // path: string[] - procedure path like ["users", "get"]
+    
+    const userId = input.id;
+    return { id: userId, name: "Alice" };
+  });
+```
+
+## Composing with Effect operations
+
+You can use any Effect operation within your procedure:
+
+```typescript
+const processData = effectOs
+  .input(z.object({ data: z.string() }))
+  .effect(function* ({ input }) {
+    // Conditional logic
+    const validated = yield* Effect.if(
+      input.data.length > 0,
+      {
+        onTrue: () => Effect.succeed(input.data),
+        onFalse: () => Effect.fail(new Error("Empty data"))
+      }
+    );
+    
+    // Parallel operations
+    const [result1, result2] = yield* Effect.all([
+      Effect.succeed(validated.toUpperCase()),
+      Effect.succeed(validated.length)
+    ]);
+    
+    return { text: result1, length: result2 };
+  });
+```
+
+## Mixing Effect and standard procedures
+
+Effect procedures are fully compatible with standard oRPC procedures. You can mix them in the same router:
+
+```typescript
+import { os } from "@orpc/server";
+
+const router = {
+  // Standard oRPC procedure
+  health: os.handler(() => "ok"),
+  
+  // Effect procedure
+  users: {
+    me: effectOs
+      .input(z.object({ userId: z.number() }))
+      .effect(function* ({ input }) {
+        const user = yield* findUser(input.userId);
+        return user;
+      })
+  }
+};
+```
+
+## Builder methods
+
+Effect procedures support all standard oRPC builder methods:
+
+```typescript
+const procedure = effectOs
+  .input(z.object({ id: z.string() }))        // Input validation
+  .output(z.object({ name: z.string() }))     // Output validation
+  .errors({ NOT_FOUND: { status: 404 } })     // Error definitions
+  .meta({ auth: true })                       // Metadata
+  .route({ path: "/users/:id", method: "GET" }) // OpenAPI routing
+  .use(authMiddleware)                        // Middleware
+  .effect(function* ({ input }) {
+    const user = yield* findUser(input.id);
+    return { name: user.name };
+  });
+```
+
+<Tip>
+Chain builder methods before calling `.effect()` to configure your procedure. The order doesn't matter except for middleware, which executes in the order added.
+</Tip>
+
+## Runtime execution
+
+When you call an Effect procedure, the Effect is executed using the `ManagedRuntime` you provided when creating the builder:
+
+```typescript
+const runtime = ManagedRuntime.make(UserServiceLive);
+const effectOs = makeEffectORPC(runtime);
+
+// The Effect runs with the runtime's services
+const getUser = effectOs.effect(function* () {
+  const userService = yield* UserService;
+  return yield* userService.getAll();
+});
+```
+
+The runtime handles:
+- Service provision (dependency injection)
+- Error handling and conversion to oRPC errors
+- Span tracing for observability
+- Resource cleanup and lifecycle management
+
+## Type safety
+
+Effect procedures maintain full type safety across your entire procedure chain:
+
+```typescript
+const typedProcedure = effectOs
+  .input(z.object({ count: z.number() }))
+  .effect(function* ({ input }) {
+    // TypeScript knows input.count is a number
+    const result = input.count * 2;
+    return result; // Type: number
+  });
+
+// TypeScript infers the return type
+type ReturnType = typeof typedProcedure; // Procedure<..., number>
+```
+
+<Warning>
+Effect procedures can only use services provided by the `ManagedRuntime`. Attempting to use unprovided services results in a compile-time error.
+</Warning>

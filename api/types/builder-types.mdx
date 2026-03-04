@@ -1,0 +1,370 @@
+---
+title: Builder types
+description: Type definitions for Effect-enabled builders and their configurations
+---
+
+## Overview
+
+The builder types provide the foundation for creating Effect-native procedures in effect-orpc. These types preserve Effect's error and requirements tracking throughout the builder chain.
+
+## Core builder types
+
+### EffectBuilderDef
+
+Extended builder definition that includes the Effect ManagedRuntime and Effect-specific configuration.
+
+```typescript
+interface EffectBuilderDef<
+  TInputSchema extends AnySchema,
+  TOutputSchema extends AnySchema,
+  TEffectErrorMap extends EffectErrorMap,
+  TMeta extends Meta,
+  TRequirementsProvided,
+  TRuntimeError,
+> extends EnhanceRouterOptions<EffectErrorMapToErrorMap<TEffectErrorMap>> {
+  inputValidationIndex: number;
+  outputValidationIndex: number;
+  config: BuilderConfig;
+  meta: TMeta;
+  route: Route;
+  inputSchema?: TInputSchema;
+  outputSchema?: TOutputSchema;
+  runtime: ManagedRuntime.ManagedRuntime<TRequirementsProvided, TRuntimeError>;
+  spanConfig?: EffectSpanConfig;
+  effectErrorMap: TEffectErrorMap;
+}
+```
+
+**Type parameters:**
+- `TInputSchema` - The input validation schema type
+- `TOutputSchema` - The output validation schema type
+- `TEffectErrorMap` - Map of Effect-aware errors (supports both traditional and tagged errors)
+- `TMeta` - Metadata type for procedures
+- `TRequirementsProvided` - Effect requirements provided by the runtime
+- `TRuntimeError` - Runtime error type from the ManagedRuntime
+
+**Key properties:**
+- `runtime` - The ManagedRuntime that executes Effect procedures
+- `spanConfig` - Optional configuration for Effect tracing spans
+- `effectErrorMap` - Extended error map supporting both traditional errors and tagged errors
+
+**Usage:**
+
+```typescript
+import { makeEffectORPC } from '@orpc/effect'
+import { ManagedRuntime, Layer } from 'effect'
+
+const runtime = ManagedRuntime.make(Layer.empty)
+const effectOs = makeEffectORPC(runtime)
+
+// The builder's ~effect property contains EffectBuilderDef
+const procedure = effectOs
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input }) {
+    // Effect logic here
+  })
+```
+
+### EffectSpanConfig
+
+Configuration for Effect span tracing to enable observability.
+
+```typescript
+interface EffectSpanConfig {
+  name: string;
+  captureStackTrace: () => string | undefined;
+}
+```
+
+**Properties:**
+- `name` - The name of the span for telemetry (e.g., 'users.getUser')
+- `captureStackTrace` - Function to lazily capture the stack trace at definition time
+
+**Usage:**
+
+```typescript
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .traced('users.getUser')  // Adds span configuration
+  .effect(function* ({ input }) {
+    const userService = yield* UserService
+    return yield* userService.findById(input.id)
+  })
+```
+
+## Builder variant types
+
+### EffectBuilderWithMiddlewares
+
+Builder with middleware support that can be further extended or converted to a procedure.
+
+```typescript
+interface EffectBuilderWithMiddlewares<
+  TInitialContext,
+  TCurrentContext,
+  TInputSchema,
+  TOutputSchema,
+  TEffectErrorMap,
+  TMeta,
+  TRequirementsProvided,
+  TRuntimeError,
+> {
+  "~effect": EffectBuilderDef<...>;
+  "~orpc": BuilderDef<...>;
+  
+  errors<U extends EffectErrorMap>(errors: U): EffectBuilderWithMiddlewares<...>;
+  use<UOutContext>(middleware: Middleware<...>): EffectBuilderWithMiddlewares<...>;
+  meta(meta: TMeta): EffectBuilderWithMiddlewares<...>;
+  route(route: Route): EffectProcedureBuilder<...>;
+  input<USchema>(schema: USchema): EffectProcedureBuilderWithInput<...>;
+  output<USchema>(schema: USchema): EffectProcedureBuilderWithOutput<...>;
+  handler<UFuncOutput>(handler: EffectProcedureHandler<...>): EffectDecoratedProcedure<...>;
+  effect<UFuncOutput>(effectFn: EffectProcedureHandler<...>): EffectDecoratedProcedure<...>;
+  traced(spanName: string): EffectProcedureBuilderWithInput<...>;
+  prefix(prefix: HTTPPath): EffectRouterBuilder<...>;
+  tag(...tags: string[]): EffectRouterBuilder<...>;
+  router<U>(router: U): EnhancedEffectRouter<...>;
+  lazy<U>(loader: () => Promise<{ default: U }>): EnhancedEffectRouter<...>;
+}
+```
+
+**Usage:**
+
+```typescript
+// Start with middleware
+const authedOs = effectOs.use(authMiddleware)
+
+// Add error handling
+const withErrors = authedOs.errors({
+  USER_NOT_FOUND: UserNotFoundError,
+})
+
+// Define a procedure
+const getUser = withErrors
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input, context }) {
+    // context has auth info from middleware
+    const user = yield* userService.findById(input.id)
+    if (!user) yield* new UserNotFoundError()
+    return user
+  })
+```
+
+### EffectProcedureBuilder
+
+Builder for procedures with a route definition.
+
+```typescript
+interface EffectProcedureBuilder<
+  TInitialContext,
+  TCurrentContext,
+  TInputSchema,
+  TOutputSchema,
+  TEffectErrorMap,
+  TMeta,
+  TRequirementsProvided,
+  TRuntimeError,
+> {
+  errors<U>(errors: U): EffectProcedureBuilder<...>;
+  use<UOutContext>(middleware: Middleware<...>): EffectProcedureBuilder<...>;
+  meta(meta: TMeta): EffectProcedureBuilder<...>;
+  route(route: Route): EffectProcedureBuilder<...>;
+  input<USchema>(schema: USchema): EffectProcedureBuilderWithInput<...>;
+  output<USchema>(schema: USchema): EffectProcedureBuilderWithOutput<...>;
+  handler<UFuncOutput>(handler: EffectProcedureHandler<...>): EffectDecoratedProcedure<...>;
+  effect<UFuncOutput>(effectFn: EffectProcedureHandler<...>): EffectDecoratedProcedure<...>;
+}
+```
+
+### EffectProcedureBuilderWithInput
+
+Builder for procedures with an input schema defined.
+
+```typescript
+interface EffectProcedureBuilderWithInput<
+  TInitialContext,
+  TCurrentContext,
+  TInputSchema,
+  TOutputSchema,
+  TEffectErrorMap,
+  TMeta,
+  TRequirementsProvided,
+  TRuntimeError,
+> {
+  output<USchema>(schema: USchema): EffectProcedureBuilderWithInputOutput<...>;
+  handler<UFuncOutput>(handler: EffectProcedureHandler<...>): EffectDecoratedProcedure<...>;
+  effect<UFuncOutput>(effectFn: EffectProcedureHandler<...>): EffectDecoratedProcedure<...>;
+  traced(spanName: string): EffectProcedureBuilderWithInput<...>;
+  // ... other methods
+}
+```
+
+**Usage:**
+
+```typescript
+// Input schema is defined, handler receives typed input
+const createUser = effectOs
+  .input(z.object({ 
+    name: z.string(),
+    email: z.string().email(),
+  }))
+  .effect(function* ({ input }) {
+    // input is typed as { name: string, email: string }
+    return yield* userService.create(input)
+  })
+```
+
+### EffectProcedureBuilderWithOutput
+
+Builder for procedures with an output schema defined.
+
+```typescript
+interface EffectProcedureBuilderWithOutput<
+  TInitialContext,
+  TCurrentContext,
+  TInputSchema,
+  TOutputSchema,
+  TEffectErrorMap,
+  TMeta,
+  TRequirementsProvided,
+  TRuntimeError,
+> {
+  input<USchema>(schema: USchema): EffectProcedureBuilderWithInputOutput<...>;
+  handler(handler: EffectProcedureHandler<...>): EffectDecoratedProcedure<...>;
+  effect<UFuncOutput>(effectFn: EffectProcedureHandler<...>): EffectDecoratedProcedure<...>;
+  traced(spanName: string): EffectProcedureBuilderWithInput<...>;
+  // ... other methods
+}
+```
+
+### EffectProcedureBuilderWithInputOutput
+
+Builder for procedures with both input and output schemas defined.
+
+```typescript
+interface EffectProcedureBuilderWithInputOutput<
+  TInitialContext,
+  TCurrentContext,
+  TInputSchema,
+  TOutputSchema,
+  TEffectErrorMap,
+  TMeta,
+  TRequirementsProvided,
+  TRuntimeError,
+> {
+  handler(handler: EffectProcedureHandler<...>): EffectDecoratedProcedure<...>;
+  effect<UFuncOutput>(effectFn: EffectProcedureHandler<...>): EffectDecoratedProcedure<...>;
+  traced(spanName: string): EffectProcedureBuilderWithInput<...>;
+  // ... other methods
+}
+```
+
+**Usage:**
+
+```typescript
+const userSchema = z.object({ id: z.string(), name: z.string() })
+
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .output(userSchema)  // Output will be validated
+  .effect(function* ({ input }) {
+    const user = yield* userService.findById(input.id)
+    return user  // Must match userSchema
+  })
+```
+
+## Router builder types
+
+### EffectRouterBuilder
+
+Builder for creating routers with shared configuration.
+
+```typescript
+interface EffectRouterBuilder<
+  TInitialContext,
+  TCurrentContext,
+  TEffectErrorMap,
+  TMeta,
+  TRequirementsProvided,
+  TRuntimeError,
+> {
+  errors<U>(errors: U): EffectRouterBuilder<...>;
+  use<UOutContext>(middleware: Middleware<...>): EffectRouterBuilder<...>;
+  prefix(prefix: HTTPPath): EffectRouterBuilder<...>;
+  tag(...tags: string[]): EffectRouterBuilder<...>;
+  router<U>(router: U): EnhancedEffectRouter<...>;
+  lazy<U>(loader: () => Promise<{ default: U }>): EnhancedEffectRouter<...>;
+}
+```
+
+**Usage:**
+
+```typescript
+const apiV1 = effectOs
+  .prefix('/api/v1')
+  .tag('v1')
+  .router({
+    users: userRouter,
+    posts: postRouter,
+  })
+```
+
+### EnhancedEffectRouter
+
+Type for routers enhanced with Effect-specific configuration.
+
+```typescript
+type EnhancedEffectRouter<
+  T extends Lazyable<AnyRouter>,
+  TInitialContext,
+  TCurrentContext,
+  TEffectErrorMap,
+> = /* recursive type that preserves Effect types through router structure */
+```
+
+## Type inference helpers
+
+### AnyBuilderLike
+
+Matches any oRPC builder-like object with the `~orpc` definition property.
+
+```typescript
+interface AnyBuilderLike<
+  TInputSchema extends AnySchema = AnySchema,
+  TOutputSchema extends AnySchema = AnySchema,
+  TErrorMap extends ErrorMap = ErrorMap,
+  TMeta extends Meta = Meta,
+> {
+  "~orpc": BuilderDef<TInputSchema, TOutputSchema, TErrorMap, TMeta>;
+}
+```
+
+### InferBuilder types
+
+Utility types for extracting type parameters from builders:
+
+```typescript
+type InferBuilderInitialContext<T> = /* extracts initial context */
+type InferBuilderCurrentContext<T> = /* extracts current context */
+type InferBuilderInputSchema<T> = /* extracts input schema */
+type InferBuilderOutputSchema<T> = /* extracts output schema */
+type InferBuilderErrorMap<T> = /* extracts error map */
+type InferBuilderMeta<T> = /* extracts metadata */
+```
+
+**Usage:**
+
+```typescript
+const myBuilder = effectOs
+  .use(authMiddleware)
+  .errors({ USER_NOT_FOUND: UserNotFoundError })
+
+type Context = InferBuilderCurrentContext<typeof myBuilder>
+type Errors = InferBuilderErrorMap<typeof myBuilder>
+```
+
+## See also
+
+- [Procedure types](/api/types/procedure-types) - Types for procedures and handlers
+- [Error types](/api/types/error-types) - Types for Effect-aware error handling
+- [makeEffectORPC](/api/core/make-effect-orpc) - Create an Effect-enabled builder

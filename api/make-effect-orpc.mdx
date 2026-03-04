@@ -1,0 +1,341 @@
+---
+title: makeEffectORPC
+description: Create an Effect-aware procedure builder with ManagedRuntime support
+---
+
+## Overview
+
+`makeEffectORPC` creates an Effect-native procedure builder that wraps an oRPC Builder instance with the specified `ManagedRuntime`. This enables writing procedures using Effect's generator syntax with full type-safe service injection.
+
+## Signature
+
+### With default builder
+
+```typescript
+function makeEffectORPC<TRequirementsProvided, TRuntimeError>(
+  runtime: ManagedRuntime.ManagedRuntime<TRequirementsProvided, TRuntimeError>
+): EffectBuilder<
+  Context,
+  Context,
+  Schema<unknown, unknown>,
+  Schema<unknown, unknown>,
+  Record<never, never>,
+  Record<never, never>,
+  TRequirementsProvided,
+  TRuntimeError
+>
+```
+
+<ParamField path="runtime" type="ManagedRuntime.ManagedRuntime<R, E>" required>
+  The ManagedRuntime instance that provides services for Effect procedures. Services available in the runtime are automatically typed and accessible via `yield*` in procedure handlers.
+</ParamField>
+
+<ResponseField name="EffectBuilder" type="EffectBuilder">
+  An Effect-aware builder instance that can define procedures using `.effect()` method. Extends all standard oRPC builder methods.
+</ResponseField>
+
+### With existing builder
+
+```typescript
+function makeEffectORPC<
+  TBuilder extends AnyBuilderLike,
+  TRequirementsProvided,
+  TRuntimeError
+>(
+  runtime: ManagedRuntime.ManagedRuntime<TRequirementsProvided, TRuntimeError>,
+  builder: TBuilder
+): EffectBuilder<
+  InferBuilderInitialContext<TBuilder>,
+  InferBuilderCurrentContext<TBuilder>,
+  InferBuilderInputSchema<TBuilder>,
+  InferBuilderOutputSchema<TBuilder>,
+  InferBuilderErrorMap<TBuilder>,
+  InferBuilderMeta<TBuilder>,
+  TRequirementsProvided,
+  TRuntimeError
+>
+```
+
+<ParamField path="runtime" type="ManagedRuntime.ManagedRuntime<R, E>" required>
+  The ManagedRuntime instance that provides services for Effect procedures.
+</ParamField>
+
+<ParamField path="builder" type="AnyBuilderLike">
+  An existing oRPC Builder instance to wrap with Effect support (e.g., a customized `os` with middleware or context). When provided, all configuration from the builder (context, errors, middleware, etc.) is preserved.
+</ParamField>
+
+<ResponseField name="EffectBuilder" type="EffectBuilder">
+  An Effect-aware builder that inherits all configuration from the provided builder, plus Effect capabilities.
+</ResponseField>
+
+## Basic usage
+
+### Simple setup with default builder
+
+```typescript
+import { makeEffectORPC } from 'effect-orpc'
+import { Effect, Layer, ManagedRuntime } from 'effect'
+
+// Create a service
+class UserService extends Effect.Service<UserService>()("UserService", {
+  accessors: true,
+  sync: () => ({
+    findById: (id: string) => Effect.succeed({ id, name: 'John' })
+  })
+}) {}
+
+// Create runtime with the service
+const runtime = ManagedRuntime.make(UserService.Default)
+
+// Create Effect-aware builder
+const effectOs = makeEffectORPC(runtime)
+
+// Define procedures with automatic service injection
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input }) {
+    // UserService is automatically available
+    const user = yield* UserService.findById(input.id)
+    return user
+  })
+```
+
+### With existing builder
+
+```typescript
+import { os } from '@orpc/server'
+import { makeEffectORPC } from 'effect-orpc'
+import { ManagedRuntime } from 'effect'
+
+// Create a customized base builder with middleware
+const authedOs = os
+  .errors({ UNAUTHORIZED: { status: 401 } })
+  .$context<{ userId?: number }>()
+  .use(({ context, errors, next }) => {
+    if (context.userId === undefined) throw errors.UNAUTHORIZED()
+    return next({ context: { ...context, userId: context.userId } })
+  })
+
+// Define services
+class UsersRepo extends Effect.Service<UsersRepo>()("UsersRepo", {
+  accessors: true,
+  sync: () => ({
+    findById: (id: number) => Effect.succeed({ id, name: 'John' })
+  })
+}) {}
+
+// Create runtime
+const runtime = ManagedRuntime.make(UsersRepo.Default)
+
+// Wrap the authenticated builder with Effect support
+const effectOs = makeEffectORPC(runtime, authedOs)
+
+// Now all procedures have both auth middleware AND Effect support
+const getUser = effectOs
+  .input(z.object({ id: z.number() }))
+  .effect(function* ({ context, input }) {
+    // context.userId is available from authedOs middleware
+    // UsersRepo is available from runtime
+    const user = yield* UsersRepo.findById(input.id)
+    return user
+  })
+```
+
+## Type safety with services
+
+The builder enforces that Effect procedures only use services provided by the `ManagedRuntime`. Attempting to use a service not in the runtime results in a compile-time error:
+
+```typescript
+import { Context, Effect, Layer, ManagedRuntime } from 'effect'
+import { makeEffectORPC } from 'effect-orpc'
+
+class ProvidedService extends Context.Tag("ProvidedService")<
+  ProvidedService,
+  { doSomething: () => Effect.Effect<string> }
+>() {}
+
+class MissingService extends Context.Tag("MissingService")<
+  MissingService,
+  { doSomething: () => Effect.Effect<string> }
+>() {}
+
+// Runtime only provides ProvidedService
+const runtime = ManagedRuntime.make(
+  Layer.succeed(ProvidedService, {
+    doSomething: () => Effect.succeed('ok')
+  })
+)
+
+const effectOs = makeEffectORPC(runtime)
+
+// ✅ This compiles - ProvidedService is in the runtime
+const works = effectOs.effect(function* () {
+  const service = yield* ProvidedService
+  return yield* service.doSomething()
+})
+
+// ❌ Type error - MissingService is not in the runtime
+const fails = effectOs.effect(function* () {
+  const service = yield* MissingService // Type error!
+  return yield* service.doSomething()
+})
+```
+
+## Combining with error handling
+
+```typescript
+import { makeEffectORPC, ORPCTaggedError } from 'effect-orpc'
+import { Effect, ManagedRuntime } from 'effect'
+import { z } from 'zod'
+
+// Define tagged error
+class UserNotFoundError extends ORPCTaggedError('UserNotFoundError', {
+  status: 404
+}) {}
+
+class UserService extends Effect.Service<UserService>()("UserService", {
+  accessors: true,
+  sync: () => ({
+    findById: (id: string) => 
+      Effect.succeed({ id, name: 'John' }).pipe(
+        Effect.filterOrFail(
+          (user) => user.id === id,
+          () => new UserNotFoundError()
+        )
+      )
+  })
+}) {}
+
+const runtime = ManagedRuntime.make(UserService.Default)
+const effectOs = makeEffectORPC(runtime)
+  .errors({ UserNotFoundError })
+
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input }) {
+    // Errors are automatically propagated
+    const user = yield* UserService.findById(input.id)
+    return user
+  })
+```
+
+## OpenTelemetry integration
+
+Add OpenTelemetry support by including the tracing layer in your runtime:
+
+```typescript
+import { NodeSdk } from '@effect/opentelemetry'
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http'
+import { SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base'
+import { Effect, Layer, ManagedRuntime } from 'effect'
+import { makeEffectORPC } from 'effect-orpc'
+
+const TracingLive = NodeSdk.layer(
+  Effect.sync(() => ({
+    resource: { serviceName: 'my-service' },
+    spanProcessor: [new SimpleSpanProcessor(new OTLPTraceExporter())]
+  }))
+)
+
+class UserService extends Effect.Service<UserService>()("UserService", {
+  accessors: true,
+  sync: () => ({
+    findById: (id: string) => Effect.succeed({ id, name: 'John' })
+  })
+}) {}
+
+const AppLive = Layer.mergeAll(UserService.Default, TracingLive)
+const runtime = ManagedRuntime.make(AppLive)
+const effectOs = makeEffectORPC(runtime)
+
+// All procedures are automatically traced
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .traced('custom.span.name') // Optional: override default span name
+  .effect(function* ({ input }) {
+    const user = yield* UserService.findById(input.id)
+    return user
+  })
+```
+
+## Mixing Effect and standard procedures
+
+You can freely mix Effect procedures with standard oRPC procedures in the same router:
+
+```typescript
+import { os } from '@orpc/server'
+import { makeEffectORPC } from 'effect-orpc'
+import { ManagedRuntime } from 'effect'
+
+const runtime = ManagedRuntime.make(Layer.empty)
+const effectOs = makeEffectORPC(runtime)
+
+export const router = {
+  // Standard oRPC procedure
+  health: os.handler(() => 'ok'),
+  
+  // Effect procedure
+  users: {
+    list: effectOs.effect(function* () {
+      const service = yield* UserService
+      return yield* service.list()
+    })
+  },
+  
+  // Another standard procedure
+  version: os.handler(() => ({ version: '1.0.0' }))
+}
+```
+
+## Builder inheritance
+
+When wrapping an existing builder, the returned `EffectBuilder` inherits all configuration:
+
+- Context type and initial context
+- Middleware stack
+- Error definitions
+- Metadata
+- Route configuration
+- Input/output schemas
+- Builder config (validation indexes, dedupe settings)
+
+```typescript
+import { os } from '@orpc/server'
+import { makeEffectORPC } from 'effect-orpc'
+
+const baseBuilder = os
+  .$context<{ orgId: string }>()
+  .errors({ NOT_FOUND: { status: 404 } })
+  .use(loggingMiddleware)
+
+const effectOs = makeEffectORPC(runtime, baseBuilder)
+
+// effectOs inherits:
+// - context type { orgId: string }
+// - NOT_FOUND error
+// - loggingMiddleware
+
+const procedure = effectOs.effect(function* ({ context }) {
+  // context.orgId is available and typed
+  console.log(context.orgId)
+  // ...
+})
+```
+
+## Best practices
+
+1. **Create runtime at application startup**: Construct the `ManagedRuntime` once and reuse it across all procedure builders.
+
+2. **Include all services in the runtime**: Add all required services to the runtime's layer to ensure type safety.
+
+3. **Use builder wrapping for shared configuration**: When multiple procedures share middleware or context, create a base builder and wrap it with `makeEffectORPC`.
+
+4. **Separate concerns**: Define services, errors, and runtime configuration in separate modules for better organization.
+
+5. **Enable tracing for production**: Include OpenTelemetry layer in production runtimes for observability.
+
+## Related
+
+- [EffectBuilder](/api/effect-builder) - The returned builder class with all available methods
+- [EffectDecoratedProcedure](/api/effect-procedure) - The result of calling `.effect()`
+- [ORPCTaggedError](/api/orpc-tagged-error) - Creating Effect-native error classes

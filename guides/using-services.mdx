@@ -1,0 +1,240 @@
+---
+title: Using services
+description: Inject and use Effect services in your procedures with compile-time type safety
+---
+
+Effect-orpc provides type-safe service injection through `ManagedRuntime`, ensuring you can only use services that are actually provided at compile time.
+
+## Defining services
+
+Create services using Effect's `Effect.Service` or `Context.Tag`:
+
+### Using Effect.Service
+
+The recommended approach for defining services with accessors:
+
+```ts
+import { Effect } from "effect";
+
+interface User {
+  id: number;
+  name: string;
+}
+
+class UserService extends Effect.Service<UserService>()("UserService", {
+  accessors: true,
+  sync: () => ({
+    findById: (id: number) => users.find((u) => u.id === id),
+    create: (name: string) => {
+      const user = { id: users.length + 1, name };
+      users.push(user);
+      return user;
+    },
+  }),
+}) {}
+```
+
+### Using Context.Tag
+
+For more complex service implementations:
+
+```ts
+import { Context, Effect } from "effect";
+
+class DatabaseService extends Context.Tag("DatabaseService")<
+  DatabaseService,
+  {
+    query: (sql: string) => Effect.Effect<any[]>;
+    transaction: <A>(fn: () => Effect.Effect<A>) => Effect.Effect<A>;
+  }
+>() {}
+```
+
+## Creating service layers
+
+Implement your services as Effect layers:
+
+```ts
+import { Layer } from "effect";
+
+const DatabaseServiceLive = Layer.succeed(DatabaseService, {
+  query: (sql: string) => Effect.promise(() => db.query(sql)),
+  transaction: <A>(fn: () => Effect.Effect<A>) =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => db.beginTransaction()),
+      () => fn(),
+      (tx) => Effect.sync(() => tx.commit()),
+    ),
+});
+```
+
+### Composing multiple services
+
+Combine multiple service layers using `Layer.mergeAll`:
+
+```ts
+const AppLive = Layer.mergeAll(
+  DatabaseServiceLive,
+  UserService.Default,
+  AuthService.Default,
+);
+
+const runtime = ManagedRuntime.make(AppLive);
+```
+
+## Providing services to procedures
+
+<Steps>
+  <Step title="Create a ManagedRuntime with your services">
+    ```ts
+    import { ManagedRuntime } from "effect";
+
+    const runtime = ManagedRuntime.make(AppLive);
+    ```
+  </Step>
+
+  <Step title="Create the Effect-aware builder">
+    ```ts
+    import { makeEffectORPC } from "effect-orpc";
+
+    const effectOs = makeEffectORPC(runtime);
+    ```
+  </Step>
+
+  <Step title="Use services in procedures">
+    ```ts
+    const getUser = effectOs
+      .input(z.object({ id: z.number() }))
+      .effect(function* ({ input }) {
+        const user = yield* UserService.findById(input.id);
+        return user;
+      });
+    ```
+  </Step>
+</Steps>
+
+## Type-safe service injection
+
+The wrapper enforces that Effect procedures only use services provided by the runtime:
+
+```ts
+import { Context, Layer, ManagedRuntime } from "effect";
+
+class ProvidedService extends Context.Tag("ProvidedService")<
+  ProvidedService,
+  { doSomething: () => Effect.Effect<string> }
+>() {}
+
+class MissingService extends Context.Tag("MissingService")<
+  MissingService,
+  { doSomething: () => Effect.Effect<string> }
+>() {}
+
+const runtime = ManagedRuntime.make(
+  Layer.succeed(ProvidedService, {
+    doSomething: () => Effect.succeed("ok"),
+  }),
+);
+
+const effectOs = makeEffectORPC(runtime);
+
+// ✅ This compiles - ProvidedService is in the runtime
+const works = effectOs.effect(function* () {
+  const service = yield* ProvidedService;
+  return yield* service.doSomething();
+});
+
+// ❌ This fails to compile - MissingService is not in the runtime
+const fails = effectOs.effect(function* () {
+  const service = yield* MissingService; // Type error!
+  return yield* service.doSomething();
+});
+```
+
+<Warning>
+  Attempting to use a service not provided by the runtime will result in a compile-time type error.
+</Warning>
+
+## Service dependencies
+
+Services can depend on other services using `Effect.gen` and yielding dependencies:
+
+```ts
+const UserServiceLive = Layer.effect(
+  UserService,
+  Effect.gen(function* () {
+    const db = yield* DatabaseService;
+
+    return {
+      findById: (id: number) =>
+        db.query(`SELECT * FROM users WHERE id = ${id}`).pipe(
+          Effect.map((rows) => rows[0]),
+        ),
+      create: (name: string) =>
+        db.query(`INSERT INTO users (name) VALUES ('${name}')`).pipe(
+          Effect.map((result) => ({ id: result.insertId, name })),
+        ),
+    };
+  }),
+);
+```
+
+## Best practices
+
+### Keep services focused
+
+Each service should have a single responsibility:
+
+```ts
+// ✅ Good - focused service
+class EmailService extends Effect.Service<EmailService>()("EmailService", {
+  accessors: true,
+  sync: () => ({
+    send: (to: string, subject: string, body: string) =>
+      Effect.promise(() => mailer.send({ to, subject, body })),
+  }),
+}) {}
+
+// ❌ Avoid - too many responsibilities
+class AppService extends Effect.Service<AppService>()("AppService", {
+  accessors: true,
+  sync: () => ({
+    sendEmail: () => {/* ... */},
+    queryDatabase: () => {/* ... */},
+    authenticateUser: () => {/* ... */},
+  }),
+}) {}
+```
+
+### Use service accessors
+
+Enable accessors for cleaner service usage:
+
+```ts
+class UserService extends Effect.Service<UserService>()("UserService", {
+  accessors: true, // Enables UserService.findById() syntax
+  sync: () => ({
+    findById: (id: number) => {/* ... */},
+  }),
+}) {}
+
+// Use the accessor directly
+const user = yield* UserService.findById(123);
+```
+
+### Test with mock services
+
+Create test layers for easier testing:
+
+```ts
+const UserServiceMock = Layer.succeed(UserService, UserService.of({
+  findById: (id: number) => Effect.succeed({ id, name: "Test User" }),
+  create: (name: string) => Effect.succeed({ id: 1, name }),
+}));
+
+const testRuntime = ManagedRuntime.make(UserServiceMock);
+```
+
+<Tip>
+  Use `Effect.Service` with `accessors: true` for the cleanest service usage pattern in your procedures.
+</Tip>

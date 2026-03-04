@@ -1,0 +1,314 @@
+---
+title: Tracing
+description: Automatically trace Effect procedures with OpenTelemetry-compatible spans for observability and debugging
+---
+
+Effect-orpc automatically traces all Effect procedures with OpenTelemetry-compatible spans using Effect's `Effect.withSpan`. This provides detailed observability into your procedure execution, including timing, errors, and call stacks.
+
+## Automatic tracing
+
+All Effect procedures are automatically wrapped with tracing. The span name defaults to the procedure's path:
+
+```typescript
+const router = {
+  users: {
+    // Span name: "users.get"
+    get: effectOs
+      .input(z.object({ id: z.string() }))
+      .effect(function* ({ input }) {
+        const userService = yield* UserService;
+        return yield* userService.findById(input.id);
+      }),
+    
+    // Span name: "users.create"
+    create: effectOs
+      .input(z.object({ name: z.string() }))
+      .effect(function* ({ input }) {
+        const userService = yield* UserService;
+        return yield* userService.create(input.name);
+      })
+  }
+};
+```
+
+<Note>
+The span name is derived from the router structure by joining the path segments with dots (e.g., `["users", "get"]` becomes `"users.get"`).
+</Note>
+
+## Custom span names
+
+Override the default span name using `.traced()`:
+
+```typescript
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .traced("custom.span.name")  // Override default path-based name
+  .effect(function* ({ input }) {
+    const userService = yield* UserService;
+    return yield* userService.findById(input.id);
+  });
+
+// You can use any naming convention
+const procedure = effectOs
+  .traced("api:v1:users:get")
+  .effect(function* () {
+    // Span name will be "api:v1:users:get"
+    return yield* fetchData();
+  });
+```
+
+<Tip>
+Use custom span names to:
+- Match your organization's naming conventions
+- Add version prefixes (e.g., `"v2.users.get"`)
+- Group related operations (e.g., `"payment.charge.card"`)
+</Tip>
+
+## Enabling OpenTelemetry
+
+To export traces, add the OpenTelemetry layer to your runtime:
+
+```typescript
+import { NodeSdk } from "@effect/opentelemetry";
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+import { SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
+import { Effect, Layer, ManagedRuntime } from "effect";
+
+const TracingLive = NodeSdk.layer(
+  Effect.sync(() => ({
+    resource: { serviceName: "my-service" },
+    spanProcessor: [new SimpleSpanProcessor(new OTLPTraceExporter())]
+  }))
+);
+
+const AppLive = Layer.mergeAll(
+  UserServiceLive,
+  TracingLive
+);
+
+const runtime = ManagedRuntime.make(AppLive);
+const effectOs = makeEffectORPC(runtime);
+```
+
+## Stack traces in spans
+
+When a procedure fails, the span includes a properly formatted stack trace pointing to the definition site:
+
+```typescript
+class UserNotFoundError extends ORPCTaggedError("UserNotFoundError") {}
+
+const getUser = effectOs
+  .errors({ UserNotFoundError })
+  .traced("users.getById")
+  .effect(function* ({ input }) {
+    const user = yield* findUser(input.id);
+    
+    if (!user) {
+      return yield* new UserNotFoundError();  // Stack trace captured here
+    }
+    
+    return user;
+  });
+```
+
+The span will include a stack trace like:
+
+```
+UserNotFoundError: User not found
+    at <anonymous> (/app/src/procedures.ts:42:28)
+    at users.getById (/app/src/procedures.ts:41:35)
+```
+
+<Note>
+Stack traces are captured at procedure definition time, not execution time, providing accurate source locations.
+</Note>
+
+## Nested spans
+
+Effect operations create nested spans automatically:
+
+```typescript
+class UserService extends Effect.Service<UserService>()("UserService", {
+  effect: Effect.gen(function* () {
+    const db = yield* Database;
+    
+    return {
+      findById: (id: string) =>
+        // This creates a nested span
+        Effect.withSpan(
+          db.query(`SELECT * FROM users WHERE id = ?`, [id]),
+          "UserService.findById"
+        )
+    };
+  })
+}) {}
+
+const getUser = effectOs
+  .traced("users.get")
+  .effect(function* ({ input }) {
+    const user = yield* UserService.findById(input.id);
+    return user;
+  });
+
+// Creates span hierarchy:
+// └─ users.get
+//    └─ UserService.findById
+```
+
+## Span attributes
+
+Add custom attributes to spans for richer telemetry:
+
+```typescript
+import { Effect } from "effect";
+
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .traced("users.get")
+  .effect(function* ({ input }) {
+    return yield* Effect.withSpan(
+      Effect.gen(function* () {
+        const user = yield* findUser(input.id);
+        return user;
+      }),
+      "users.get",
+      {
+        attributes: {
+          "user.id": input.id,
+          "operation.type": "read"
+        }
+      }
+    );
+  });
+```
+
+## Tracing with middleware
+
+Combine tracing with middleware for comprehensive observability:
+
+```typescript
+import { os } from "@orpc/server";
+
+const loggingMiddleware = os.use(({ path, next }) => {
+  console.log(`[START] ${path.join(".")}`);
+  const start = Date.now();
+  
+  const result = next();
+  
+  const duration = Date.now() - start;
+  console.log(`[END] ${path.join(".")} - ${duration}ms`);
+  
+  return result;
+});
+
+const effectOs = makeEffectORPC(runtime, loggingMiddleware);
+
+const procedure = effectOs
+  .traced("api.operation")
+  .effect(function* () {
+    // Both middleware logging and span tracing active
+    return yield* performWork();
+  });
+```
+
+## Exporting to different backends
+
+Configure different trace exporters:
+
+```typescript
+import { ConsoleSpanExporter } from "@opentelemetry/sdk-trace-base";
+import { JaegerExporter } from "@opentelemetry/exporter-jaeger";
+import { ZipkinExporter } from "@opentelemetry/exporter-zipkin";
+
+// Console (development)
+const ConsoleTracingLive = NodeSdk.layer(
+  Effect.sync(() => ({
+    resource: { serviceName: "my-service" },
+    spanProcessor: [new SimpleSpanProcessor(new ConsoleSpanExporter())]
+  }))
+);
+
+// Jaeger (production)
+const JaegerTracingLive = NodeSdk.layer(
+  Effect.sync(() => ({
+    resource: { serviceName: "my-service" },
+    spanProcessor: [
+      new SimpleSpanProcessor(
+        new JaegerExporter({ endpoint: "http://localhost:14268/api/traces" })
+      )
+    ]
+  }))
+);
+
+// Zipkin
+const ZipkinTracingLive = NodeSdk.layer(
+  Effect.sync(() => ({
+    resource: { serviceName: "my-service" },
+    spanProcessor: [
+      new SimpleSpanProcessor(
+        new ZipkinExporter({ url: "http://localhost:9411/api/v2/spans" })
+      )
+    ]
+  }))
+);
+```
+
+<Tip>
+Use environment variables to switch between exporters:
+
+```typescript
+const TracingLive = process.env.NODE_ENV === "production"
+  ? JaegerTracingLive
+  : ConsoleTracingLive;
+```
+</Tip>
+
+## Sampling
+
+Control which traces are exported using sampling:
+
+```typescript
+import { AlwaysOnSampler, ParentBasedSampler, TraceIdRatioBasedSampler } from "@opentelemetry/sdk-trace-base";
+
+// Always sample (development)
+const AlwaysSample = NodeSdk.layer(
+  Effect.sync(() => ({
+    resource: { serviceName: "my-service" },
+    sampler: new AlwaysOnSampler(),
+    spanProcessor: [new SimpleSpanProcessor(new OTLPTraceExporter())]
+  }))
+);
+
+// Sample 10% of traces (production)
+const RatioSample = NodeSdk.layer(
+  Effect.sync(() => ({
+    resource: { serviceName: "my-service" },
+    sampler: new TraceIdRatioBasedSampler(0.1),
+    spanProcessor: [new SimpleSpanProcessor(new OTLPTraceExporter())]
+  }))
+);
+```
+
+## Troubleshooting
+
+### Traces not appearing
+
+Ensure the OpenTelemetry layer is included in your runtime:
+
+```typescript
+// ❌ Tracing layer not included
+const runtime = ManagedRuntime.make(UserServiceLive);
+
+// ✅ Tracing layer included
+const runtime = ManagedRuntime.make(
+  Layer.mergeAll(UserServiceLive, TracingLive)
+);
+```
+
+### Missing stack traces
+
+Stack traces are captured at definition time. Make sure `.traced()` is called during procedure definition, not dynamically at runtime.
+
+<Warning>
+Don't create procedures dynamically inside request handlers, as this can cause stack traces to point to the wrong location.
+</Warning>

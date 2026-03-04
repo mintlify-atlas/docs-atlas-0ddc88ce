@@ -1,0 +1,291 @@
+---
+title: Error management
+description: Create and handle type-safe Effect errors with ORPCTaggedError
+---
+
+Effect-orpc provides `ORPCTaggedError` to create Effect-native error classes that integrate seamlessly with oRPC's error handling.
+
+## Creating tagged errors
+
+Use `ORPCTaggedError` to create error classes that can be yielded in Effect generators:
+
+### Basic error
+
+The error code defaults to CONSTANT_CASE of the tag:
+
+```ts
+import { ORPCTaggedError } from "effect-orpc";
+
+// Code defaults to 'USER_NOT_FOUND' (CONSTANT_CASE of tag)
+class UserNotFound extends ORPCTaggedError("UserNotFound") {}
+```
+
+### Error with explicit code
+
+Specify a custom error code:
+
+```ts
+class NotFound extends ORPCTaggedError("NotFound", { code: "NOT_FOUND" }) {}
+```
+
+### Error with default options
+
+Set default status and message:
+
+```ts
+class ValidationError extends ORPCTaggedError("ValidationError", {
+  status: 400,
+  message: "Validation failed",
+}) {}
+```
+
+### Error with typed data
+
+Use a schema to type the error's data payload:
+
+```ts
+import z from "zod";
+
+class UserNotFoundWithData extends ORPCTaggedError("UserNotFoundWithData", {
+  schema: z.object({ userId: z.string() }),
+}) {}
+
+// Usage
+const error = new UserNotFoundWithData({
+  data: { userId: "123" },
+});
+```
+
+### Complete example
+
+Combine all options:
+
+```ts
+class ForbiddenError extends ORPCTaggedError("ForbiddenError", {
+  code: "FORBIDDEN",
+  status: 403,
+  message: "Access denied",
+  schema: z.object({
+    reason: z.string(),
+  }),
+}) {}
+```
+
+## Using errors in procedures
+
+<Steps>
+  <Step title="Define your error classes">
+    ```ts
+    class UserNotFoundError extends ORPCTaggedError("UserNotFoundError", {
+      status: 404,
+    }) {}
+    ```
+  </Step>
+
+  <Step title="Register errors with .errors()">
+    Add errors to your builder or procedure:
+
+    ```ts
+    const effectOs = makeEffectORPC(runtime).errors({
+      UserNotFoundError,
+    });
+    ```
+  </Step>
+
+  <Step title="Yield errors in Effect generators">
+    ```ts
+    const getUser = effectOs
+      .input(z.object({ id: z.number() }))
+      .effect(function* ({ input }) {
+        const user = yield* UserService.get(input.id);
+        if (!user) {
+          return yield* new UserNotFoundError();
+        }
+        return user;
+      });
+    ```
+  </Step>
+</Steps>
+
+## Mixed error maps
+
+You can mix tagged errors with traditional oRPC errors:
+
+```ts
+const getUser = effectOs
+  .errors({
+    // Regular oRPC error
+    NOT_FOUND: {
+      message: "User not found",
+      data: z.object({ id: z.string() }),
+    },
+    // Effect oRPC tagged error
+    UserNotFoundError,
+  })
+  .effect(function* ({ input, errors }) {
+    const user = yield* UserService.findById(input.id);
+    if (!user) {
+      // Use either approach
+      return yield* new UserNotFoundError();
+      // or return `yield* Effect.fail(errors.NOT_FOUND({ data: { id: input.id } }))`
+    }
+    return user;
+  });
+```
+
+<Note>
+  The key in the error map is only used for accessing the error from the `errors` object. The actual error code is defined at the class level.
+</Note>
+
+## Error naming in maps
+
+You can use any key name in the error map:
+
+```ts
+const effectOs = makeEffectORPC(runtime).errors({
+  // The key name doesn't affect the error code
+  USER_NOT_FOUND: UserNotFoundError, // Still uses 'USER_NOT_FOUND_ERROR' code
+});
+
+const procedure = effectOs.effect(function* ({ errors }) {
+  // Access using your chosen key
+  return yield* Effect.fail(errors.USER_NOT_FOUND());
+});
+```
+
+## Working with error data
+
+Pass data when constructing errors:
+
+```ts
+class ValidationError extends ORPCTaggedError("ValidationError", {
+  schema: z.object({ fields: z.array(z.string()) }),
+  status: 400,
+}) {}
+
+const procedure = effectOs.effect(function* ({ input }) {
+  if (!isValid(input)) {
+    return yield* new ValidationError({
+      data: { fields: ["email", "password"] },
+      message: "Invalid fields",
+    });
+  }
+  // ...
+});
+```
+
+## Using Effect.catchTag
+
+Tagged errors work seamlessly with Effect's error handling:
+
+```ts
+const procedure = effectOs.effect(function* () {
+  const result = yield* someOperation.pipe(
+    Effect.catchTag("UserNotFoundError", (error) =>
+      Effect.succeed({ id: 0, name: "Default User" }),
+    ),
+  );
+  return result;
+});
+```
+
+## Error conversion
+
+Tagged errors automatically convert to `ORPCError` when returned from procedures:
+
+```ts
+import { toORPCError } from "effect-orpc";
+
+const error = new UserNotFoundError({ message: "User 123 not found" });
+const orpcError = toORPCError(error);
+
+// orpcError is now a plain ORPCError instance
+console.log(orpcError.code); // 'USER_NOT_FOUND_ERROR'
+console.log(orpcError.status); // 404
+```
+
+## Error properties
+
+Tagged errors include all standard ORPC error properties:
+
+```ts
+const error = new UserNotFoundError({
+  message: "Custom message",
+  data: { userId: "123" },
+});
+
+console.log(error._tag); // 'UserNotFoundError'
+console.log(error.code); // 'USER_NOT_FOUND_ERROR' (derived from tag)
+console.log(error.status); // 404
+console.log(error.message); // 'Custom message'
+console.log(error.data); // { userId: '123' }
+console.log(error.defined); // true
+```
+
+## Code derivation examples
+
+The error code is automatically derived from the tag name:
+
+```ts
+class UserNotFoundError extends ORPCTaggedError("UserNotFoundError") {}
+// Code: 'USER_NOT_FOUND_ERROR'
+
+class HTTPError extends ORPCTaggedError("HTTPError") {}
+// Code: 'HTTP_ERROR'
+
+class XMLParserError extends ORPCTaggedError("XMLParserError") {}
+// Code: 'XML_PARSER_ERROR'
+
+class UnauthorizedError extends ORPCTaggedError("UnauthorizedError") {}
+// Code: 'UNAUTHORIZED_ERROR'
+```
+
+## Best practices
+
+### Define errors at the module level
+
+```ts
+// errors.ts
+export class UserNotFoundError extends ORPCTaggedError("UserNotFoundError", {
+  status: 404,
+}) {}
+
+export class ValidationError extends ORPCTaggedError("ValidationError", {
+  status: 400,
+  schema: z.object({ fields: z.array(z.string()) }),
+}) {}
+```
+
+### Register common errors globally
+
+```ts
+const effectOs = makeEffectORPC(runtime).errors({
+  UserNotFoundError,
+  ValidationError,
+  UnauthorizedError,
+});
+
+// All procedures inherit these errors
+```
+
+### Add procedure-specific errors locally
+
+```ts
+class PaymentFailedError extends ORPCTaggedError("PaymentFailedError", {
+  status: 402,
+}) {}
+
+const processPayment = effectOs
+  .errors({ PaymentFailedError }) // Add locally
+  .effect(function* ({ input }) {
+    // ...
+  });
+```
+
+<Warning>
+  Always register error classes with `.errors()` before yielding them. Unregistered errors won't be recognized by the client.
+</Warning>
+
+<Tip>
+  Use descriptive error names and provide helpful data to make debugging easier for API consumers.
+</Tip>

@@ -1,0 +1,377 @@
+---
+title: ORPCTaggedError
+description: Create Effect-native tagged error classes that integrate with oRPC error handling
+---
+
+## Overview
+
+`ORPCTaggedError` is a factory function that creates Effect-native error classes combining Effect's `YieldableError` with oRPC's error properties. These errors can be yielded in Effect generators and automatically convert to `ORPCError` when needed.
+
+## Signature
+
+```typescript
+function ORPCTaggedError<
+  TTag extends string,
+  TSchema extends AnySchema = AnySchema,
+  TCode extends ORPCErrorCode = ToConstantCase<TTag>
+>(
+  tag: TTag,
+  props?: {
+    schema?: TSchema;
+    status?: number;
+    message?: string;
+    code?: TCode;
+  }
+): ORPCTaggedErrorClass<TTag, TCode, TSchema>
+```
+
+<ParamField path="tag" type="string" required>
+  The unique tag for this error type, used for discriminated unions and Effect's `catchTag`.
+</ParamField>
+
+<ParamField path="props" type="object">
+  Optional configuration for the error class.
+  
+  <ParamField path="schema" type="AnySchema">
+    Standard Schema (e.g., Zod) for validating the error's data payload.
+  </ParamField>
+  
+  <ParamField path="status" type="number">
+    Default HTTP status code for the error (e.g., 404, 400, 500).
+  </ParamField>
+  
+  <ParamField path="message" type="string">
+    Default error message.
+  </ParamField>
+  
+  <ParamField path="code" type="ORPCErrorCode">
+    oRPC error code. If omitted, automatically derived from the tag in CONSTANT_CASE (e.g., `UserNotFoundError` → `USER_NOT_FOUND_ERROR`).
+  </ParamField>
+</ParamField>
+
+<ResponseField name="ORPCTaggedErrorClass" type="class">
+  A class constructor that creates `ORPCTaggedErrorInstance` objects. The class has static `_tag` and `code` properties.
+</ResponseField>
+
+## Basic usage
+
+### Simple error with auto-generated code
+
+```typescript
+import { ORPCTaggedError } from 'effect-orpc'
+import { Effect } from 'effect'
+
+// Code automatically becomes 'USER_NOT_FOUND_ERROR'
+class UserNotFoundError extends ORPCTaggedError('UserNotFoundError') {}
+
+const getUser = (id: string) => Effect.gen(function* () {
+  const user = yield* findUser(id)
+  if (!user) {
+    return yield* new UserNotFoundError()
+  }
+  return user
+})
+```
+
+### With explicit code
+
+```typescript
+class NotFoundError extends ORPCTaggedError('NotFoundError', {
+  code: 'NOT_FOUND'
+}) {}
+```
+
+### With default options
+
+```typescript
+class ValidationError extends ORPCTaggedError('ValidationError', {
+  status: 400,
+  message: 'Validation failed'
+}) {}
+
+// Uses defaults when instantiated without options
+const error = new ValidationError()
+console.log(error.status)  // 400
+console.log(error.message) // "Validation failed"
+```
+
+### With typed data schema
+
+```typescript
+import { z } from 'zod'
+
+class ForbiddenError extends ORPCTaggedError('ForbiddenError', {
+  code: 'FORBIDDEN',
+  status: 403,
+  message: 'Access denied',
+  schema: z.object({
+    reason: z.string(),
+    userId: z.string().optional()
+  })
+}) {}
+
+// Must provide data matching the schema
+const error = new ForbiddenError({
+  data: {
+    reason: 'Insufficient permissions',
+    userId: '123'
+  }
+})
+```
+
+## Error instance properties
+
+Instances of `ORPCTaggedError` classes have the following properties:
+
+<ResponseField name="_tag" type="string">
+  The error's tag for discriminated unions.
+</ResponseField>
+
+<ResponseField name="code" type="ORPCErrorCode">
+  The oRPC error code.
+</ResponseField>
+
+<ResponseField name="status" type="number">
+  HTTP status code associated with the error.
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Human-readable error message.
+</ResponseField>
+
+<ResponseField name="data" type="InferSchemaOutput<TSchema>">
+  Additional data payload validated by the schema.
+</ResponseField>
+
+<ResponseField name="defined" type="boolean">
+  Whether the error is a defined oRPC error (defaults to `true`).
+</ResponseField>
+
+<ResponseField name="schema" type="TSchema">
+  The schema used to validate the error's data.
+</ResponseField>
+
+## Instance methods
+
+### toORPCError()
+
+Converts the tagged error to a plain `ORPCError` instance.
+
+```typescript
+const taggedError = new UserNotFoundError({
+  message: 'User with ID 123 not found'
+})
+
+const orpcError = taggedError.toORPCError()
+// orpcError is now an ORPCError instance
+```
+
+### toJSON()
+
+Serializes the error to JSON format including the `_tag` field.
+
+```typescript
+const error = new ValidationError({
+  data: { fields: ['email'] },
+  message: 'Invalid input'
+})
+
+console.log(error.toJSON())
+// {
+//   _tag: 'ValidationError',
+//   defined: true,
+//   code: 'VALIDATION_ERROR',
+//   status: 400,
+//   message: 'Invalid input',
+//   data: { fields: ['email'] }
+// }
+```
+
+## Constructor options
+
+When instantiating an error class, you can provide the following options:
+
+<ParamField path="message" type="string">
+  Override the default error message.
+</ParamField>
+
+<ParamField path="status" type="number">
+  Override the default HTTP status code. Must be a valid error status (400-599).
+</ParamField>
+
+<ParamField path="data" type="InferSchemaOutput<TSchema>">
+  Additional error data matching the schema.
+</ParamField>
+
+<ParamField path="cause" type="unknown">
+  The underlying cause of the error (e.g., another error that was caught).
+</ParamField>
+
+<ParamField path="defined" type="boolean">
+  Whether to mark this as a defined oRPC error. Defaults to `true`.
+</ParamField>
+
+```typescript
+const error = new UserNotFoundError({
+  message: 'User with ID 456 not found',
+  status: 410, // Override default 404
+  cause: originalError,
+  defined: false
+})
+```
+
+## Using with Effect
+
+### Yielding errors in generators
+
+```typescript
+import { Effect } from 'effect'
+
+const getUser = (id: string) => Effect.gen(function* () {
+  const user = yield* UsersRepo.get(id)
+  if (!user) {
+    // Yield the error directly
+    return yield* new UserNotFoundError()
+  }
+  return user
+})
+```
+
+### Catching tagged errors
+
+```typescript
+const program = Effect.gen(function* () {
+  const user = yield* getUser('123')
+  return user
+}).pipe(
+  Effect.catchTag('UserNotFoundError', (error) => {
+    // error is typed as UserNotFoundError
+    return Effect.succeed({ id: '123', name: 'Guest' })
+  })
+)
+```
+
+### With error data
+
+```typescript
+class ValidationError extends ORPCTaggedError('ValidationError', {
+  schema: z.object({ fields: z.array(z.string()) }),
+  code: 'BAD_REQUEST'
+}) {}
+
+const program = Effect.fail(
+  new ValidationError({ data: { fields: ['email', 'password'] } })
+).pipe(
+  Effect.catchTag('ValidationError', (e) => {
+    // e.data is typed as { fields: string[] }
+    console.log(`Invalid fields: ${e.data.fields.join(', ')}`)
+    return Effect.succeed(null)
+  })
+)
+```
+
+## Using with oRPC procedures
+
+Register tagged errors in the `.errors()` map to make them recognized by the client:
+
+```typescript
+import { makeEffectORPC } from 'effect-orpc'
+
+class UserNotFoundError extends ORPCTaggedError('UserNotFoundError', {
+  status: 404
+}) {}
+
+class ValidationError extends ORPCTaggedError('ValidationError', {
+  code: 'BAD_REQUEST'
+}) {}
+
+const effectOs = makeEffectORPC(runtime)
+  .errors({
+    UserNotFoundError,
+    ValidationError,
+    // Can also mix with traditional oRPC errors
+    FORBIDDEN: { status: 403, message: 'Access denied' }
+  })
+
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input, errors }) {
+    const user = yield* UsersRepo.findById(input.id)
+    if (!user) {
+      // Can yield directly or use errors object
+      return yield* new UserNotFoundError()
+      // Or: return yield* Effect.fail(errors.UserNotFoundError())
+    }
+    return user
+  })
+```
+
+## Automatic code generation
+
+When you omit the `code` property, it's automatically generated from the tag in CONSTANT_CASE:
+
+```typescript
+// Tag → Generated Code
+UserNotFoundError     → USER_NOT_FOUND_ERROR
+ValidationError       → VALIDATION_ERROR
+HTTPError             → HTTP_ERROR
+XMLParserError        → XML_PARSER_ERROR
+UnauthorizedError     → UNAUTHORIZED_ERROR
+```
+
+The algorithm handles:
+- PascalCase to CONSTANT_CASE conversion
+- Consecutive uppercase letters (e.g., `HTTP`, `XML`)
+- Mixed case patterns
+
+## Type utilities
+
+### TagToCode
+
+Converts a tag name to an error code in CONSTANT_CASE at the type level:
+
+```typescript
+import { type TagToCode } from 'effect-orpc'
+
+type Code = TagToCode<'UserNotFoundError'>
+// type Code = "USER_NOT_FOUND_ERROR"
+```
+
+### InferORPCError
+
+Infers the equivalent `ORPCError` type from a tagged error instance:
+
+```typescript
+import { type InferORPCError } from 'effect-orpc'
+
+class MyError extends ORPCTaggedError('MyError', {
+  schema: z.object({ id: z.string() })
+}) {}
+
+type ErrorType = InferORPCError<MyError>
+// type ErrorType = ORPCError<"MY_ERROR", { id: string }>
+```
+
+## Best practices
+
+1. **Define errors at module level**: Create error classes once and reuse them across procedures.
+
+2. **Use descriptive tags**: Tags should clearly describe the error condition (e.g., `UserNotFoundError`, not just `NotFound`).
+
+3. **Provide schemas for structured data**: Use Standard Schema to validate error data payloads.
+
+4. **Register in error maps**: Add errors to `.errors()` maps so clients can distinguish between defined and unexpected errors.
+
+5. **Include context in data**: Put error-specific context (IDs, field names, etc.) in the `data` field rather than interpolating into messages.
+
+```typescript
+// Good
+new UserNotFoundError({
+  data: { userId: '123' }
+})
+
+// Less ideal
+new UserNotFoundError({
+  message: 'User 123 not found'
+})
+```

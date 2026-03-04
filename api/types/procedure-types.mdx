@@ -1,0 +1,353 @@
+---
+title: Procedure types
+description: Type definitions for Effect-enabled procedures and handlers
+---
+
+## Overview
+
+The procedure types define the structure of Effect-native procedures and their handlers. These types preserve full Effect type information including errors and requirements.
+
+## Procedure definition types
+
+### EffectProcedureDef
+
+Extended procedure definition that includes the Effect ManagedRuntime.
+
+```typescript
+interface EffectProcedureDef<
+  TInitialContext extends Context,
+  TCurrentContext extends Context,
+  TInputSchema extends AnySchema,
+  TOutputSchema extends AnySchema,
+  TEffectErrorMap extends EffectErrorMap,
+  TMeta extends Meta,
+  TRequirementsProvided,
+  TRuntimeError,
+> extends ProcedureDef<
+  TInitialContext,
+  TCurrentContext,
+  TInputSchema,
+  TOutputSchema,
+  EffectErrorMapToErrorMap<TEffectErrorMap>,
+  TMeta
+> {
+  runtime: ManagedRuntime.ManagedRuntime<TRequirementsProvided, TRuntimeError>;
+  effectErrorMap: TEffectErrorMap;
+}
+```
+
+**Type parameters:**
+- `TInitialContext` - The initial context type before middleware transformations
+- `TCurrentContext` - The current context type after middleware transformations
+- `TInputSchema` - The input validation schema type
+- `TOutputSchema` - The output validation schema type
+- `TEffectErrorMap` - Map of Effect-aware errors
+- `TMeta` - Metadata type for the procedure
+- `TRequirementsProvided` - Effect requirements provided by the runtime
+- `TRuntimeError` - Runtime error type from the ManagedRuntime
+
+**Key properties:**
+- `runtime` - The ManagedRuntime that executes the procedure's Effect
+- `effectErrorMap` - Extended error map supporting tagged errors
+
+### EffectProcedure
+
+An Effect-native procedure class that extends the base oRPC Procedure.
+
+```typescript
+class EffectProcedure<
+  TInitialContext,
+  TCurrentContext,
+  TInputSchema,
+  TOutputSchema,
+  TEffectErrorMap,
+  TMeta,
+  TRequirementsProvided,
+  TRuntimeError,
+> extends Procedure<...> {
+  "~effect": EffectProcedureDef<...>;
+  "~orpc": ProcedureDef<...>;
+}
+```
+
+### EffectDecoratedProcedure
+
+A decorated procedure with additional methods for configuration and client creation.
+
+```typescript
+class EffectDecoratedProcedure<
+  TInitialContext,
+  TCurrentContext,
+  TInputSchema,
+  TOutputSchema,
+  TEffectErrorMap,
+  TMeta,
+  TRequirementsProvided,
+  TRuntimeError,
+> extends EffectProcedure<...> {
+  errors<U>(errors: U): EffectDecoratedProcedure<...>;
+  meta(meta: TMeta): EffectDecoratedProcedure<...>;
+  route(route: Route): EffectDecoratedProcedure<...>;
+  use<UOutContext>(middleware: Middleware<...>): EffectDecoratedProcedure<...>;
+  callable<TClientContext>(options?: CreateProcedureClientOptions): 
+    EffectDecoratedProcedure & ProcedureClient;
+  actionable(options?: CreateProcedureClientOptions): 
+    EffectDecoratedProcedure & ProcedureActionableClient;
+}
+```
+
+**Usage:**
+
+```typescript
+import { makeEffectORPC } from '@orpc/effect'
+import { Effect, Layer, ManagedRuntime } from 'effect'
+import { z } from 'zod'
+
+const runtime = ManagedRuntime.make(Layer.empty)
+const effectOs = makeEffectORPC(runtime)
+
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input }) {
+    return yield* userService.findById(input.id)
+  })
+
+// getUser is an EffectDecoratedProcedure
+// Add more configuration after creation
+const enhancedGetUser = getUser
+  .errors({ USER_NOT_FOUND: UserNotFoundError })
+  .meta({ description: 'Get user by ID' })
+```
+
+## Handler types
+
+### EffectProcedureHandler
+
+Handler type for Effect procedures. The handler receives procedure options and returns an Effect.
+
+```typescript
+type EffectProcedureHandler<
+  TCurrentContext extends Context,
+  TInput,
+  THandlerOutput,
+  TEffectErrorMap extends EffectErrorMap,
+  TRequirementsProvided,
+  TMeta extends Meta,
+> = (
+  opt: ProcedureHandlerOptions<
+    TCurrentContext,
+    TInput,
+    EffectErrorConstructorMap<TEffectErrorMap>,
+    TMeta
+  >,
+) => Generator<
+  YieldWrap<
+    Effect.Effect<
+      any,
+      | EffectErrorMapToUnion<TEffectErrorMap>
+      | ORPCError<ORPCErrorCode, unknown>,
+      TRequirementsProvided
+    >
+  >,
+  THandlerOutput,
+  never
+>;
+```
+
+**Type parameters:**
+- `TCurrentContext` - The context type available to the handler
+- `TInput` - The input type (from input schema)
+- `THandlerOutput` - The output type the handler returns
+- `TEffectErrorMap` - Map of possible errors
+- `TRequirementsProvided` - Effect requirements that can be used
+- `TMeta` - Metadata type
+
+**Handler options:**
+
+The handler receives a single options object with:
+- `context` - The current context (after middleware)
+- `input` - The validated input
+- `path` - The procedure path (e.g., ['users', 'getById'])
+- `procedure` - Reference to the procedure itself
+- `signal` - AbortSignal for cancellation
+- `lastEventId` - For server-sent events
+- `errors` - Error constructor map for creating typed errors
+
+**Usage:**
+
+```typescript
+import { Effect } from 'effect'
+import { z } from 'zod'
+
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .errors({ USER_NOT_FOUND: UserNotFoundError })
+  .effect(function* ({ input, context, errors }) {
+    // input is typed as { id: string }
+    // context has the current context type
+    // errors.USER_NOT_FOUND is a typed error constructor
+    
+    const userService = yield* UserService
+    const user = yield* userService.findById(input.id)
+    
+    if (!user) {
+      // Yield an error
+      yield* new errors.USER_NOT_FOUND({ 
+        data: { userId: input.id } 
+      })
+    }
+    
+    return user
+  })
+```
+
+### NonEffectProcedureHandler
+
+Handler type for non-Effect procedures that return Promises instead of Effects.
+
+```typescript
+type NonEffectProcedureHandler<
+  TCurrentContext extends Context,
+  TInput,
+  THandlerOutput,
+  TEffectErrorMap extends EffectErrorMap,
+  TMeta extends Meta,
+> = (
+  opt: ProcedureHandlerOptions<
+    TCurrentContext,
+    TInput,
+    EffectErrorConstructorMap<TEffectErrorMap>,
+    TMeta
+  >,
+) => Promisable<THandlerOutput>;
+```
+
+**Usage:**
+
+```typescript
+// Use .handler() instead of .effect() for non-Effect handlers
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .handler(async ({ input }) => {
+    // Regular async/await instead of Effect
+    const user = await db.users.findOne({ id: input.id })
+    return user
+  })
+```
+
+## Effect error mapping types
+
+### EffectErrorMapToErrorMap
+
+Converts an Effect error map to a standard oRPC error map for interoperability.
+
+```typescript
+type EffectErrorMapToErrorMap<T extends EffectErrorMap> = {
+  [K in keyof T as /* ... complex conditional logic ... */]: /* ... */
+};
+```
+
+This type handles the conversion between:
+- Traditional oRPC error items (plain objects)
+- ORPCTaggedError classes
+
+**Usage:**
+
+```typescript
+const effectErrorMap = {
+  USER_NOT_FOUND: UserNotFoundError,  // Tagged error class
+  BAD_REQUEST: { status: 400 },       // Traditional error item
+} satisfies EffectErrorMap
+
+type StandardErrorMap = EffectErrorMapToErrorMap<typeof effectErrorMap>
+// Result: { 
+//   NOT_FOUND: { status: 404, data?: unknown },
+//   BAD_REQUEST: { status: 400 }
+// }
+```
+
+## Client types
+
+When you make a procedure callable or actionable, it gains additional methods:
+
+### Callable procedure
+
+```typescript
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input }) {
+    return yield* userService.findById(input.id)
+  })
+  .callable()  // Makes it callable as a function
+
+// Can now be called directly
+const user = await getUser({ id: '123' })
+
+// Still has procedure methods
+getUser.route({ path: '/users/:id' })
+```
+
+### Actionable procedure
+
+```typescript
+const createUser = effectOs
+  .input(z.object({ name: z.string() }))
+  .effect(function* ({ input }) {
+    return yield* userService.create(input)
+  })
+  .actionable()  // Makes it compatible with server actions
+
+// Can be used in React Server Actions
+export async function createUserAction(formData: FormData) {
+  'use server'
+  return createUser({ 
+    name: formData.get('name') as string 
+  })
+}
+```
+
+## Type inference examples
+
+### Inferring handler types
+
+```typescript
+const getUser = effectOs
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input, context }) {
+    // TypeScript infers:
+    // - input: { id: string }
+    // - context: {} (or whatever your middleware provides)
+    return yield* userService.findById(input.id)
+  })
+
+type GetUserInput = Parameters<typeof getUser>[0]
+// { id: string }
+
+type GetUserOutput = Awaited<ReturnType<typeof getUser>>
+// User (whatever your handler returns)
+```
+
+### Inferring error types
+
+```typescript
+class UserNotFoundError extends ORPCTaggedError('UserNotFoundError') {}
+class UnauthorizedError extends ORPCTaggedError('UnauthorizedError') {}
+
+const getUser = effectOs
+  .errors({
+    USER_NOT_FOUND: UserNotFoundError,
+    UNAUTHORIZED: UnauthorizedError,
+  })
+  .input(z.object({ id: z.string() }))
+  .effect(function* ({ input, errors }) {
+    // errors is typed with both error constructors
+    // errors.USER_NOT_FOUND(...)
+    // errors.UNAUTHORIZED(...)
+  })
+```
+
+## See also
+
+- [Builder types](/api/types/builder-types) - Types for builders and configuration
+- [Error types](/api/types/error-types) - Types for Effect-aware error handling
+- [Effect procedure handler](/guides/effect-handlers) - Guide to writing Effect handlers
