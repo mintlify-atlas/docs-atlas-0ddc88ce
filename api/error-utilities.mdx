@@ -9,6 +9,41 @@ This page documents utility functions and types for working with tagged errors i
 
 ## Functions
 
+### addSpanStackTrace()
+
+Captures the stack trace at the call site for better error reporting in OpenTelemetry spans. This function is used internally by effect-orpc to capture where procedures are defined, providing better debugging context when errors occur.
+
+#### Signature
+
+```typescript
+function addSpanStackTrace(): () => string | undefined
+```
+
+<ResponseField name="result" type="() => string | undefined">
+  A function that returns the captured stack trace frame when called, or `undefined` if no stack trace is available.
+</ResponseField>
+
+#### Usage
+
+This function is primarily used internally by the library. It captures the stack trace at procedure definition time to provide better error context:
+
+```typescript
+import { addSpanStackTrace } from 'effect-orpc'
+
+// Capture stack trace at definition time
+const getStackFrame = addSpanStackTrace()
+
+// Later, retrieve the stack frame
+const stackFrame = getStackFrame()
+// Returns something like: "at Object.<anonymous> (/app/src/procedures.ts:42:28)"
+```
+
+The function uses a cached approach for performance - the stack trace is captured once at creation time and reused on subsequent calls.
+
+<Note>
+You typically don't need to use this function directly. It's used internally by effect-orpc to enhance error spans with stack traces that point to where procedures are defined.
+</Note>
+
 ### toORPCError()
 
 Converts an `ORPCTaggedError` instance to a plain `ORPCError` instance. This is useful when you need to throw or return a plain oRPC error from a handler.
